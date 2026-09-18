@@ -1,0 +1,130 @@
+import SwiftUI
+
+struct ContentView: View {
+    @StateObject private var fan = FanController()
+    private let nomes = ["Desligado", "Lento", "Médio", "Rápido"]
+    private let fontes = ["boot", "chave física", "celular", "bluetooth", "timer"]
+
+    var body: some View {
+        VStack(spacing: 18) {
+
+            HStack {
+                Text("Ventilador").font(.title2.weight(.semibold))
+                Spacer()
+                HStack(spacing: 6) {
+                    Circle()
+                        .fill(corDoLink)
+                        .frame(width: 8, height: 8)
+                    Text(fan.link.label)
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
+            }
+
+            VStack(spacing: 4) {
+                Text(nomes[min(fan.state.speed, 3)])
+                    .font(.system(size: 40, weight: .bold, design: .rounded))
+                Text(legenda)
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            .frame(maxWidth: .infinity)
+            .padding(.vertical, 22)
+            .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 18))
+
+            LazyVGrid(columns: [GridItem(), GridItem()], spacing: 12) {
+                ForEach(0..<4, id: \.self) { n in
+                    Button { fan.setSpeed(n) } label: {
+                        VStack(spacing: 4) {
+                            Text("\(n)").font(.system(size: 26, weight: .bold, design: .rounded))
+                            Text(nomes[n]).font(.caption2).foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 18)
+                        .background(
+                            fan.state.target == n ? Color.accentColor.opacity(0.22)
+                                                  : Color.white.opacity(0.06),
+                            in: RoundedRectangle(cornerRadius: 16)
+                        )
+                        .overlay(
+                            RoundedRectangle(cornerRadius: 16)
+                                .stroke(fan.state.target == n ? Color.accentColor : .clear,
+                                        lineWidth: 1)
+                        )
+                    }
+                    .buttonStyle(.plain)
+                }
+            }
+
+            VStack(alignment: .leading, spacing: 10) {
+                Text("DESLIGAR DEPOIS DE")
+                    .font(.caption2.weight(.semibold))
+                    .foregroundStyle(.secondary)
+                HStack(spacing: 8) {
+                    ForEach([0, 15, 30, 60, 120], id: \.self) { m in
+                        Button(m == 0 ? "Nunca" : (m < 60 ? "\(m)min" : "\(m/60)h")) {
+                            fan.setTimer(minutes: m)
+                        }
+                        .font(.footnote)
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 10)
+                        .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
+                        .buttonStyle(.plain)
+                    }
+                }
+            }
+            .padding(14)
+            .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 18))
+
+            if case .bluetooth = fan.link {
+                Toggle(isOn: Binding(
+                    get: { fan.state.wifiOn },
+                    set: { fan.setWifi($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Wi-Fi do ventilador").font(.footnote)
+                        Text(fan.state.wifiOn
+                             ? "no ar — abra ventilador.local no navegador"
+                             : "desligado (economiza energia)")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                .padding(14)
+                .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 18))
+            }
+
+            Spacer()
+
+            HStack {
+                Text("Host Wi-Fi")
+                    .font(.caption).foregroundStyle(.secondary)
+                TextField("ventilador.local", text: $fan.wifiHost)
+                    .textFieldStyle(.roundedBorder)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.caption)
+            }
+        }
+        .padding(20)
+        .frame(maxHeight: .infinity, alignment: .top)
+        .background(Color(red: 0.055, green: 0.067, blue: 0.086).ignoresSafeArea())
+        .tint(Color(red: 0.37, green: 0.69, blue: 0.94))
+    }
+
+    private var legenda: String {
+        if fan.state.busy || fan.state.speed != fan.state.target {
+            return "mudando para \(nomes[min(fan.state.target, 3)].lowercased())…"
+        }
+        if fan.state.timerMin > 0 { return "desliga em \(fan.state.timerMin) min" }
+        return "último comando: \(fontes[min(fan.state.source, 4)])"
+    }
+
+    private var corDoLink: Color {
+        switch fan.link {
+        case .offline:   return .gray
+        case .scanning:  return .yellow
+        case .bluetooth: return .blue
+        case .wifi:      return .green
+        }
+    }
+}
