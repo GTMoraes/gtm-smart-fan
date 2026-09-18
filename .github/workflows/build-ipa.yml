@@ -1,0 +1,113 @@
+name: Build unsigned IPA
+
+# Compila o app Ventilador num macOS alugado do GitHub e publica o .ipa
+# sem assinatura num Release. Quem assina e instala e o AltStore, no iPhone.
+# Mesmo padrao do build do ChargeSpeed.
+
+on:
+  workflow_dispatch:
+    inputs:
+      bundle_id:
+        description: "Bundle identifier do app"
+        required: true
+        default: "com.gtm.ventilador"
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: macos-26
+    timeout-minutes: 30
+
+    steps:
+      - name: Baixar o codigo
+        uses: actions/checkout@v4
+
+      - name: Selecionar o Xcode mais recente da maquina
+        run: |
+          set -euo pipefail
+          XC="$(ls -d /Applications/Xcode*.app | sort -V | tail -1)"
+          echo "Usando $XC"
+          sudo xcode-select -s "$XC"
+          xcodebuild -version
+
+      - name: Instalar o XcodeGen
+        run: brew install xcodegen
+
+      - name: Ajustar o bundle id
+        env:
+          BUNDLE_ID: ${{ inputs.bundle_id }}
+        run: |
+          set -euo pipefail
+          python3 - <<'PY'
+          import os, re, pathlib, sys
+          bid = os.environ["BUNDLE_ID"].strip()
+          if not re.fullmatch(r"[A-Za-z0-9.\-]+", bid):
+              sys.exit("bundle_id invalido")
+          p = pathlib.Path("project.yml")
+          s = p.read_text()
+          s, n = re.subn(r"PRODUCT_BUNDLE_IDENTIFIER:\s*\S+", f"PRODUCT_BUNDLE_IDENTIFIER: {bid}", s)
+          if n != 1:
+              sys.exit("PRODUCT_BUNDLE_IDENTIFIER nao encontrado")
+          p.write_text(s)
+          print(s)
+          PY
+
+      - name: Gerar o .xcodeproj
+        run: xcodegen generate
+
+      - name: Compilar sem assinatura
+        run: |
+          set -euo pipefail
+          xcodebuild \
+            -project Ventilador.xcodeproj \
+            -scheme Ventilador \
+            -configuration Release \
+            -sdk iphoneos \
+            -destination 'generic/platform=iOS' \
+            -derivedDataPath build \
+            CODE_SIGN_IDENTITY="" \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGNING_ALLOWED=NO \
+            build 2>&1 | tee build.log | tail -40
+
+      - name: Empacotar o .ipa
+        run: |
+          set -euo pipefail
+          APP="build/Build/Products/Release-iphoneos/Ventilador.app"
+          test -d "$APP" || { echo "App nao foi gerado"; exit 1; }
+          rm -rf Payload Ventilador-unsigned.ipa
+          mkdir Payload
+          cp -R "$APP" Payload/
+          rm -rf Payload/Ventilador.app/_CodeSignature
+          zip -qry Ventilador-unsigned.ipa Payload
+          ls -lh Ventilador-unsigned.ipa
+
+      - name: Guardar o log em caso de erro
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-log
+          path: build.log
+          if-no-files-found: ignore
+
+      - name: Publicar o .ipa num Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          TAG="ipa-$(date +%Y%m%d-%H%M%S)"
+          gh release create "$TAG" Ventilador-unsigned.ipa \
+            --title "Ventilador $TAG" \
+            --notes "IPA sem assinatura. Instale pelo AltStore ou pelo LiveContainer."
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Ventilador-unsigned.ipa"
+          {
+            echo "## IPA pronto"
+            echo ""
+            echo "    $URL"
+            echo ""
+            echo "    altstore://install?url=$URL"
+            echo ""
+          } >> "$GITHUB_STEP_SUMMARY"
+          echo "$URL"
