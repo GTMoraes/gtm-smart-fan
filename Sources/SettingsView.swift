@@ -80,7 +80,8 @@ struct SettingsView: View {
                 Button("Reiniciar o ventilador") { fan.reboot(); precisaReiniciar = false }
                     .foregroundStyle(precisaReiniciar ? Color.orange : Color.accentColor)
             } footer: {
-                if let aviso { Text(aviso).foregroundStyle(.orange) }
+                if let erro = fan.lastError { Text(erro).foregroundStyle(.red) }
+                else if let aviso { Text(aviso).foregroundStyle(.orange) }
                 else if precisaReiniciar {
                     Text("Nome do Bluetooth e pareamento só valem depois de reiniciar.")
                         .foregroundStyle(.orange)
@@ -104,7 +105,7 @@ struct SettingsView: View {
                 Button("Pronto") { dismiss() }
             }
         }
-        .onAppear { fan.refreshConfig(); carregar() }
+        .onAppear { fan.lastError = nil; fan.refreshConfig(); carregar() }
         .onChange(of: fan.config) { _, _ in carregar() }
     }
 

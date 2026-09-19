@@ -146,10 +146,17 @@ final class FanController: NSObject, ObservableObject {
 
     /// Grava um ajuste no ventilador. O pacote é `<id><texto UTF-8>`.
     func setSetting(_ id: CfgId, _ value: String) {
-        if let p = peripheral, let c = cfgWChar, p.state == .connected {
+        if let p = peripheral, p.state == .connected {
+            // Conectado por BLE mas sem a característica de ajustes: é firmware
+            // antigo na placa. Dizer isso é melhor que cair calado no HTTP.
+            guard let c = cfgWChar else {
+                lastError = "conectado, mas o ventilador não expõe ajustes por Bluetooth — regrave o firmware"
+                return
+            }
             var pkt = Data([id.rawValue])
             pkt.append(contentsOf: Array(value.utf8))
             p.writeValue(pkt, for: c, type: .withResponse)
+            lastError = nil
             // dá tempo do firmware gravar antes de reler
             Task { try? await Task.sleep(for: .milliseconds(400)); refreshConfig() }
         } else {
@@ -172,10 +179,18 @@ final class FanController: NSObject, ObservableObject {
     }
 
     func refreshConfig() {
-        if let p = peripheral, let c = cfgRChar, p.state == .connected {
+        if let p = peripheral, p.state == .connected {
+            guard let c = cfgRChar else {
+                lastError = "conectado, mas o ventilador não expõe ajustes por Bluetooth — regrave o firmware"
+                return
+            }
             p.readValue(for: c)
         } else {
-            Task { await httpConfig() }
+            Task {
+                if await httpConfig() == false {
+                    lastError = "sem Bluetooth e sem Wi-Fi — não consegui ler os ajustes"
+                }
+            }
         }
     }
 
@@ -330,7 +345,10 @@ extension FanController: CBCentralManagerDelegate, CBPeripheralDelegate {
 
     func peripheral(_ p: CBPeripheral, didDiscoverServices error: Error?) {
         p.services?.filter { $0.uuid == svcUUID }.forEach {
-            p.discoverCharacteristics([cmdUUID, stateUUID], for: $0)
+            // As quatro. Esquecer as de configuração aqui faz cfgWChar/cfgRChar
+            // ficarem nil para sempre, e a tela de ajustes silenciosamente cai
+            // no fallback HTTP — que não funciona com o Wi-Fi desligado.
+            p.discoverCharacteristics([cmdUUID, stateUUID, cfgWUUID, cfgRUUID], for: $0)
         }
     }
 
@@ -349,7 +367,7 @@ extension FanController: CBCentralManagerDelegate, CBPeripheralDelegate {
 
     func peripheral(_ p: CBPeripheral, didUpdateValueFor ch: CBCharacteristic,
                     error: Error?) {
-        if ch.uuid == cfgRUUID, let d = ch.value { applyConfig(d); return }
+        if ch.uuid == cfgRUUID, let d = ch.value { applyConfig(d); lastError = nil; return }
         guard ch.uuid == stateUUID, let d = ch.value, d.count >= 7 else { return }
         var s = FanState()
         s.speed    = Int(d[0])
