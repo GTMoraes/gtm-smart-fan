@@ -75,6 +75,41 @@ struct SettingsView: View {
             }
 
             Section {
+                Toggle(isOn: Binding(
+                    get: { fan.state.restoreOn },
+                    set: { fan.setRestore($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Voltar como estava")
+                        Text(fan.state.restoreOn
+                             ? "depois de faltar energia, religa na última velocidade"
+                             : "depois de faltar energia, fica desligado")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+                Toggle(isOn: Binding(
+                    get: { fan.state.wifiStaysOn },
+                    set: { fan.setWifiStaysOn($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Wi-Fi permanente")
+                        Text(fan.state.wifiStaysOn
+                             ? "fica no ar sempre, inclusive depois de reiniciar"
+                             : "cai sozinho após 20 min sem uso")
+                            .font(.caption).foregroundStyle(.secondary)
+                    }
+                }
+            } header: {
+                Text("Comportamento")
+            } footer: {
+                Text("O temporizador também sobrevive a queda de energia e retoma "
+                     + "de onde parou. Wi-Fi permanente é o que mantém "
+                     + "**\(mdns.isEmpty ? "ventilador" : mdns).local** de pé para atalhos do iOS "
+                     + "— ao custo de o Bluetooth ficar um pouco mais lento, porque "
+                     + "os dois dividem o mesmo rádio.")
+            }
+
+            Section {
                 Button("Salvar") { salvar() }
                     .disabled(nadaMudou)
                 Button("Reiniciar o ventilador") { fan.reboot(); precisaReiniciar = false }
