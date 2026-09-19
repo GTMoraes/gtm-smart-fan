@@ -73,6 +73,31 @@ a AltStore Classic no modo remoto já faz sozinha no seu arranjo atual.
 Dá para checar antes: no Files, dentro do app do LiveContainer, procure
 `NSBluetoothAlwaysUsageDescription` no Info.plist dele.
 
+## Tela de ajustes e atalhos do iOS (19/09/2026)
+
+- **`SettingsView.swift`** — tela de ajustes, aberta pela engrenagem no canto.
+  Nome BLE, passkey de pareamento, rede de casa, AP próprio, mDNS, token, e
+  restaurar padrão de fábrica. Tudo mora no ventilador (NVS), não no telefone:
+  trocar de celular não perde nada, e a página web mostra os mesmos valores.
+  Senhas nunca são lidas de volta — só se existem ou não.
+
+- **`Intents.swift`** — App Intents para o app Atalhos: definir velocidade,
+  desligar, programar desligamento e ligar/desligar o Wi-Fi. Entram em
+  automações, Siri, botão de ação e widget de Controle.
+
+  > ⚠️ **App Intents provavelmente NÃO aparecem pelo LiveContainer.** O sistema
+  > registra intents a partir dos metadados do app *instalado*, e pelo
+  > LiveContainer quem está instalado é o LiveContainer. É o mesmo problema da
+  > permissão de Bluetooth. Para os atalhos funcionarem, o app precisa ir numa
+  > vaga de sideload de verdade. O código fica pronto até lá — não atrapalha
+  > nada rodando no LiveContainer.
+
+  Enquanto isso, o caminho que funciona hoje é o app **Atalhos** com a ação
+  *Obter conteúdo de URL* apontando para a API HTTP. Ver `PROTOCOLO.md`.
+
+- `UIBackgroundModes: bluetooth-central` foi declarado no `project.yml` para o
+  caso de um intent disparar com o app fechado.
+
 ## Detalhes de implementação que importam
 
 - O scan filtra pelo UUID de serviço, então o app só enxerga o ventilador.

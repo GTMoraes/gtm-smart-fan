@@ -36,6 +36,10 @@ targets:
         CFBundleDisplayName: Ventilador
         UIUserInterfaceStyle: Dark
         UILaunchScreen: {}
+        # Necessário para um App Intent disparado com o app fechado conseguir
+        # usar o rádio BLE antes de o sistema suspender o processo.
+        UIBackgroundModes:
+          - bluetooth-central
         NSBluetoothAlwaysUsageDescription: >-
           O app usa Bluetooth para falar direto com o ventilador, sem rede
           e sem internet.

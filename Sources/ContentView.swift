@@ -1,7 +1,9 @@
 import SwiftUI
 
 struct ContentView: View {
-    @StateObject private var fan = FanController()
+    // Instância única: os App Intents comandam o mesmo rádio que esta tela.
+    @ObservedObject private var fan = FanController.shared
+    @State private var mostrarAjustes = false
     private let nomes = ["Desligado", "Lento", "Médio", "Rápido"]
     private let fontes = ["boot", "chave física", "celular", "bluetooth", "timer"]
 
@@ -19,6 +21,13 @@ struct ContentView: View {
                         .font(.caption)
                         .foregroundStyle(.secondary)
                 }
+                Button { mostrarAjustes = true } label: {
+                    Image(systemName: "gearshape")
+                        .font(.system(size: 17))
+                        .foregroundStyle(.secondary)
+                }
+                .padding(.leading, 4)
+                .accessibilityLabel("Ajustes")
             }
 
             VStack(spacing: 4) {
@@ -76,6 +85,21 @@ struct ContentView: View {
             .padding(14)
             .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 18))
 
+            Toggle(isOn: Binding(
+                get: { fan.state.restoreOn },
+                set: { fan.setRestore($0) }
+            )) {
+                VStack(alignment: .leading, spacing: 2) {
+                    Text("Voltar como estava").font(.footnote)
+                    Text(fan.state.restoreOn
+                         ? "depois de faltar energia, religa na última velocidade"
+                         : "depois de faltar energia, fica desligado")
+                        .font(.caption2).foregroundStyle(.secondary)
+                }
+            }
+            .padding(14)
+            .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 18))
+
             if case .bluetooth = fan.link {
                 Toggle(isOn: Binding(
                     get: { fan.state.wifiOn },
@@ -86,6 +110,21 @@ struct ContentView: View {
                         Text(fan.state.wifiOn
                              ? "no ar — abra ventilador.local no navegador"
                              : "desligado (economiza energia)")
+                            .font(.caption2).foregroundStyle(.secondary)
+                    }
+                }
+                .padding(14)
+                .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 18))
+
+                Toggle(isOn: Binding(
+                    get: { fan.state.wifiStaysOn },
+                    set: { fan.setWifiStaysOn($0) }
+                )) {
+                    VStack(alignment: .leading, spacing: 2) {
+                        Text("Wi-Fi permanente").font(.footnote)
+                        Text(fan.state.wifiStaysOn
+                             ? "fica no ar até você desligar"
+                             : "cai sozinho após 20 min sem uso")
                             .font(.caption2).foregroundStyle(.secondary)
                     }
                 }
@@ -109,6 +148,10 @@ struct ContentView: View {
         .frame(maxHeight: .infinity, alignment: .top)
         .background(Color(red: 0.055, green: 0.067, blue: 0.086).ignoresSafeArea())
         .tint(Color(red: 0.37, green: 0.69, blue: 0.94))
+        .sheet(isPresented: $mostrarAjustes) {
+            NavigationStack { SettingsView(fan: fan) }
+                .tint(Color(red: 0.37, green: 0.69, blue: 0.94))
+        }
     }
 
     private var legenda: String {

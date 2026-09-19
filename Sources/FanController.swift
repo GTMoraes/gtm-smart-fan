@@ -9,6 +9,38 @@ struct FanState: Equatable {
     var source: Int = 0
     var timerMin: Int = 0
     var wifiOn: Bool = false
+    /// "Voltar como estava depois de faltar energia" — ajuste guardado no
+    /// próprio ventilador, não no telefone.
+    var restoreOn: Bool = false
+    /// Wi-Fi NÃO se desliga sozinho por ociosidade.
+    var wifiStaysOn: Bool = false
+}
+
+/// Ajustes que moram no ventilador, não no telefone. Nenhuma senha vem junto —
+/// só a informação de que existe uma.
+struct FanConfig: Equatable {
+    var bleName     = ""
+    var staSsid     = ""
+    var apSsid      = ""
+    var mdns        = ""
+    var hasStaPass  = false
+    var hasApPass   = false
+    var hasToken    = false
+    var bleSecOn    = false
+    var wifiIdleMin = 20
+}
+
+/// Ids dos ajustes — os mesmos do firmware e do PROTOCOLO.md.
+enum CfgId: UInt8 {
+    case bleName = 0x01
+    case staSsid = 0x02
+    case staPass = 0x03
+    case apSsid  = 0x04
+    case apPass  = 0x05
+    case mdns    = 0x06
+    case token   = 0x07
+    case passkey = 0x08
+    case factory = 0x7F
 }
 
 enum Link: Equatable {
@@ -30,7 +62,12 @@ enum Link: Equatable {
 @MainActor
 final class FanController: NSObject, ObservableObject {
 
+    /// Instância única — os App Intents precisam alcançar o mesmo rádio que a
+    /// interface usa, senão cada atalho abriria uma conexão paralela.
+    static let shared = FanController()
+
     @Published var state = FanState()
+    @Published var config = FanConfig()
     @Published var link: Link = .offline
     @Published var lastError: String?
 
@@ -42,10 +79,14 @@ final class FanController: NSObject, ObservableObject {
     private let svcUUID   = CBUUID(string: "6F7A0001-4B2E-4A6D-9C1F-2B5D7E8A3C10")
     private let cmdUUID   = CBUUID(string: "6F7A0002-4B2E-4A6D-9C1F-2B5D7E8A3C10")
     private let stateUUID = CBUUID(string: "6F7A0003-4B2E-4A6D-9C1F-2B5D7E8A3C10")
+    private let cfgWUUID  = CBUUID(string: "6F7A0004-4B2E-4A6D-9C1F-2B5D7E8A3C10")
+    private let cfgRUUID  = CBUUID(string: "6F7A0005-4B2E-4A6D-9C1F-2B5D7E8A3C10")
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
     private var cmdChar: CBCharacteristic?
+    private var cfgWChar: CBCharacteristic?
+    private var cfgRChar: CBCharacteristic?
     private var pollTask: Task<Void, Never>?
 
     override init() {
@@ -86,6 +127,110 @@ final class FanController: NSObject, ObservableObject {
             return
         }
         p.writeValue(Data([0x03, on ? 1 : 0]), for: c, type: .withResponse)
+    }
+
+    /// Wi-Fi permanente x desliga sozinho. O valor "desliga sozinho" volta para
+    /// 20 min; a página web permite escolher outros degraus.
+    func setWifiStaysOn(_ on: Bool) {
+        state.wifiStaysOn = on
+        let m: UInt16 = on ? 0 : 20
+        let pkt = Data([0x05, UInt8(m & 0xFF), UInt8(m >> 8)])
+        if let p = peripheral, let c = cmdChar, p.state == .connected {
+            p.writeValue(pkt, for: c, type: .withResponse)
+        } else {
+            Task { await httpCall("/api/wifioff?min=\(m)") }
+        }
+    }
+
+    // MARK: ajustes
+
+    /// Grava um ajuste no ventilador. O pacote é `<id><texto UTF-8>`.
+    func setSetting(_ id: CfgId, _ value: String) {
+        if let p = peripheral, let c = cfgWChar, p.state == .connected {
+            var pkt = Data([id.rawValue])
+            pkt.append(contentsOf: Array(value.utf8))
+            p.writeValue(pkt, for: c, type: .withResponse)
+            // dá tempo do firmware gravar antes de reler
+            Task { try? await Task.sleep(for: .milliseconds(400)); refreshConfig() }
+        } else {
+            let esc = value.addingPercentEncoding(
+                withAllowedCharacters: .alphanumerics) ?? ""
+            Task {
+                await httpCall("/api/setcfg?id=\(id.rawValue)&v=\(esc)")
+                await httpConfig()
+            }
+        }
+    }
+
+    /// Reinicia o ventilador — necessário para nome BLE e pareamento.
+    func reboot() {
+        if let p = peripheral, let c = cmdChar, p.state == .connected {
+            p.writeValue(Data([0x06, 0x01]), for: c, type: .withResponse)
+        } else {
+            Task { await httpCall("/api/reboot") }
+        }
+    }
+
+    func refreshConfig() {
+        if let p = peripheral, let c = cfgRChar, p.state == .connected {
+            p.readValue(for: c)
+        } else {
+            Task { await httpConfig() }
+        }
+    }
+
+    @discardableResult
+    private func httpConfig() async -> Bool {
+        guard let url = URL(string: "http://\(wifiHost)/api/config") else { return false }
+        var req = URLRequest(url: url)
+        req.timeoutInterval = 3
+        req.cachePolicy = .reloadIgnoringLocalCacheData
+        do {
+            let (data, _) = try await URLSession.shared.data(for: req)
+            applyConfig(data)
+            return true
+        } catch { return false }
+    }
+
+    private func applyConfig(_ data: Data) {
+        guard let j = try? JSONSerialization.jsonObject(with: data) as? [String: Any]
+        else { return }
+        var c = FanConfig()
+        c.bleName     = j["blename"] as? String ?? ""
+        c.staSsid     = j["sta"]     as? String ?? ""
+        c.apSsid      = j["ap"]      as? String ?? ""
+        c.mdns        = j["mdns"]    as? String ?? ""
+        c.hasStaPass  = (j["hasstapass"] as? Int ?? 0) == 1
+        c.hasApPass   = (j["hasappass"]  as? Int ?? 0) == 1
+        c.hasToken    = (j["hastoken"]   as? Int ?? 0) == 1
+        c.bleSecOn    = (j["blesec"]     as? Int ?? 0) == 1
+        c.wifiIdleMin = j["wifioff"] as? Int ?? 20
+        config = c
+    }
+
+    // MARK: para os App Intents
+
+    /// Espera o BLE ficar utilizável, até `timeout`. Um atalho disparado com o
+    /// app fechado chega aqui antes de o rádio ter conectado.
+    @discardableResult
+    func waitForBluetooth(timeout: TimeInterval = 6) async -> Bool {
+        let limite = Date().addingTimeInterval(timeout)
+        while Date() < limite {
+            if bluetoothActive { return true }
+            try? await Task.sleep(for: .milliseconds(200))
+        }
+        return false
+    }
+
+    /// Liga ou desliga o "voltar como estava". Vale pelas duas vias, porque o
+    /// ajuste mora na memória do ventilador.
+    func setRestore(_ on: Bool) {
+        state.restoreOn = on                      // otimista; o notify confirma
+        if let p = peripheral, let c = cmdChar, p.state == .connected {
+            p.writeValue(Data([0x04, on ? 1 : 0]), for: c, type: .withResponse)
+        } else {
+            Task { await httpCall("/api/restore?on=\(on ? 1 : 0)") }
+        }
     }
 
     // MARK: Wi-Fi (fallback: só entra quando o Bluetooth não está disponível)
@@ -135,6 +280,8 @@ final class FanController: NSObject, ObservableObject {
         s.source   = j["source"] as? Int ?? 0
         s.timerMin = j["timer"]  as? Int ?? 0
         s.wifiOn   = true
+        s.restoreOn   = (j["restore"] as? Int ?? 0) == 1
+        s.wifiStaysOn = (j["wifioff"] as? Int ?? 20) == 0
         state = s
     }
 }
@@ -168,6 +315,8 @@ extension FanController: CBCentralManagerDelegate, CBPeripheralDelegate {
     func centralManager(_ c: CBCentralManager, didDisconnectPeripheral p: CBPeripheral,
                         error: Error?) {
         cmdChar = nil
+        cfgWChar = nil
+        cfgRChar = nil
         peripheral = nil
         link = .scanning
         c.scanForPeripherals(withServices: [svcUUID])
@@ -193,11 +342,14 @@ extension FanController: CBCentralManagerDelegate, CBPeripheralDelegate {
                 p.setNotifyValue(true, for: ch)
                 p.readValue(for: ch)
             }
+            if ch.uuid == cfgWUUID { cfgWChar = ch }
+            if ch.uuid == cfgRUUID { cfgRChar = ch; p.readValue(for: ch) }
         }
     }
 
     func peripheral(_ p: CBPeripheral, didUpdateValueFor ch: CBCharacteristic,
                     error: Error?) {
+        if ch.uuid == cfgRUUID, let d = ch.value { applyConfig(d); return }
         guard ch.uuid == stateUUID, let d = ch.value, d.count >= 7 else { return }
         var s = FanState()
         s.speed    = Int(d[0])
@@ -205,7 +357,9 @@ extension FanController: CBCentralManagerDelegate, CBPeripheralDelegate {
         s.busy     = d[2] == 1
         s.source   = Int(d[3])
         s.timerMin = Int(d[4]) | (Int(d[5]) << 8)
-        s.wifiOn   = (d[6] & 0x01) == 1
+        s.wifiOn    = (d[6] & 0x01) != 0
+        s.restoreOn    = (d[6] & 0x02) != 0
+        s.wifiStaysOn  = (d[6] & 0x04) != 0
         state = s
         link = .bluetooth
         lastError = nil
