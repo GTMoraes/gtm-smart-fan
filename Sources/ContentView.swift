@@ -4,6 +4,9 @@ struct ContentView: View {
     // Instância única: os App Intents comandam o mesmo rádio que esta tela.
     @ObservedObject private var fan = FanController.shared
     @State private var mostrarAjustes = false
+    @State private var timerH = 0
+    @State private var timerM = 30
+    @State private var timerAct = 0
     private let nomes = ["Desligado", "Lento", "Médio", "Rápido"]
     private let fontes = ["boot", "chave física", "celular", "bluetooth", "timer"]
 
@@ -65,21 +68,62 @@ struct ContentView: View {
                 }
             }
 
-            VStack(alignment: .leading, spacing: 10) {
-                Text("DESLIGAR DEPOIS DE")
-                    .font(.caption2.weight(.semibold))
-                    .foregroundStyle(.secondary)
+            VStack(alignment: .leading, spacing: 8) {
+                HStack {
+                    Text("TEMPORIZADOR")
+                        .font(.caption2.weight(.semibold))
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text(legendaTimer)
+                        .font(.caption2)
+                        .foregroundStyle(fan.state.timerMin > 0 ? Color.accentColor : .secondary)
+                }
+
+                Picker("Ação", selection: $timerAct) {
+                    Text("Desligar").tag(0)
+                    Text("Ligar 1").tag(1)
+                    Text("Ligar 2").tag(2)
+                    Text("Ligar 3").tag(3)
+                }
+                .pickerStyle(.segmented)
+
+                HStack(spacing: 0) {
+                    Picker("Horas", selection: $timerH) {
+                        ForEach(0..<25, id: \.self) { Text("\($0) h").tag($0) }
+                    }
+                    .pickerStyle(.wheel)
+                    .frame(maxWidth: .infinity, minHeight: 104, maxHeight: 104)
+                    .clipped()
+
+                    Picker("Minutos", selection: $timerM) {
+                        ForEach(0..<60, id: \.self) { Text("\($0) min").tag($0) }
+                    }
+                    .pickerStyle(.wheel)
+                    .frame(maxWidth: .infinity, minHeight: 104, maxHeight: 104)
+                    .clipped()
+                }
+
                 HStack(spacing: 8) {
-                    ForEach([0, 15, 30, 60, 120], id: \.self) { m in
-                        Button(m == 0 ? "Nunca" : (m < 60 ? "\(m)min" : "\(m/60)h")) {
-                            fan.setTimer(minutes: m)
-                        }
+                    Button("Programar") {
+                        let m = min(1440, timerH * 60 + timerM)
+                        if m > 0 { fan.setTimer(minutes: m, act: timerAct) }
+                    }
+                    .font(.footnote.weight(.medium))
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 11)
+                    .background(Color.accentColor.opacity(0.22), in: RoundedRectangle(cornerRadius: 12))
+                    .buttonStyle(.plain)
+                    .disabled(timerH == 0 && timerM == 0)
+                    .opacity(timerH == 0 && timerM == 0 ? 0.4 : 1)
+
+                    Button("Cancelar") { fan.setTimer(minutes: 0, act: 0) }
                         .font(.footnote)
                         .frame(maxWidth: .infinity)
-                        .padding(.vertical, 10)
+                        .padding(.vertical, 11)
                         .background(.white.opacity(0.06), in: RoundedRectangle(cornerRadius: 12))
                         .buttonStyle(.plain)
-                    }
+                        .disabled(fan.state.timerMin == 0)
+                        .opacity(fan.state.timerMin == 0 ? 0.4 : 1)
                 }
             }
             .padding(14)
@@ -148,17 +192,30 @@ struct ContentView: View {
         .frame(maxHeight: .infinity, alignment: .top)
         .background(Color(red: 0.055, green: 0.067, blue: 0.086).ignoresSafeArea())
         .tint(Color(red: 0.37, green: 0.69, blue: 0.94))
+        .onChange(of: fan.state.timerAct) { _, novo in timerAct = novo }
         .sheet(isPresented: $mostrarAjustes) {
             NavigationStack { SettingsView(fan: fan) }
                 .tint(Color(red: 0.37, green: 0.69, blue: 0.94))
         }
     }
 
+    /// Quanto falta, em horas e minutos.
+    private var legendaTimer: String {
+        let m = fan.state.timerMin
+        guard m > 0 else { return "sem timer" }
+        let h = m / 60, mm = m % 60
+        var p: [String] = []
+        if h > 0  { p.append("\(h) h") }
+        if mm > 0 { p.append("\(mm) min") }
+        let oque = fan.state.timerAct == 0 ? "desliga" : "liga no \(fan.state.timerAct)"
+        return oque + " em " + p.joined(separator: " e ")
+    }
+
     private var legenda: String {
         if fan.state.busy || fan.state.speed != fan.state.target {
             return "mudando para \(nomes[min(fan.state.target, 3)].lowercased())…"
         }
-        if fan.state.timerMin > 0 { return "desliga em \(fan.state.timerMin) min" }
+        if fan.state.timerMin > 0 { return legendaTimer }
         return "último comando: \(fontes[min(fan.state.source, 4)])"
     }
 

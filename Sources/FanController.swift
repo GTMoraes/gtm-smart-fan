@@ -8,6 +8,8 @@ struct FanState: Equatable {
     var busy: Bool = false
     var source: Int = 0
     var timerMin: Int = 0
+    /// O que o timer fará ao disparar: 0 desliga, 1..3 liga naquela velocidade.
+    var timerAct: Int = 0
     var wifiOn: Bool = false
     /// "Voltar como estava depois de faltar energia" — ajuste guardado no
     /// próprio ventilador, não no telefone.
@@ -109,13 +111,16 @@ final class FanController: NSObject, ObservableObject {
         }
     }
 
-    func setTimer(minutes: Int) {
-        let m = UInt16(max(0, min(720, minutes)))
+    /// `act`: 0 desliga, 1..3 liga naquela velocidade. Um timer por vez.
+    func setTimer(minutes: Int, act: Int = 0) {
+        let m = UInt16(max(0, min(1440, minutes)))   // teto 24 h
+        let a = UInt8(max(0, min(3, act)))
+        state.timerAct = Int(a)
         if let p = peripheral, let c = cmdChar, p.state == .connected {
-            p.writeValue(Data([0x02, UInt8(m & 0xFF), UInt8(m >> 8)]),
+            p.writeValue(Data([0x02, UInt8(m & 0xFF), UInt8(m >> 8), a]),
                          for: c, type: .withResponse)
         } else {
-            Task { await httpCall("/api/timer?min=\(m)") }
+            Task { await httpCall("/api/timer?min=\(m)&act=\(a)") }
         }
     }
 
@@ -294,6 +299,7 @@ final class FanController: NSObject, ObservableObject {
         s.busy     = (j["busy"]  as? Int ?? 0) == 1
         s.source   = j["source"] as? Int ?? 0
         s.timerMin = j["timer"]  as? Int ?? 0
+        s.timerAct = j["timeract"] as? Int ?? 0
         s.wifiOn   = true
         s.restoreOn   = (j["restore"] as? Int ?? 0) == 1
         s.wifiStaysOn = (j["wifioff"] as? Int ?? 20) == 0
@@ -375,6 +381,7 @@ extension FanController: CBCentralManagerDelegate, CBPeripheralDelegate {
         s.busy     = d[2] == 1
         s.source   = Int(d[3])
         s.timerMin = Int(d[4]) | (Int(d[5]) << 8)
+        s.timerAct = d.count >= 8 ? Int(d[7]) : 0
         s.wifiOn    = (d[6] & 0x01) != 0
         s.restoreOn    = (d[6] & 0x02) != 0
         s.wifiStaysOn  = (d[6] & 0x04) != 0

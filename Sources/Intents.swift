@@ -60,20 +60,23 @@ struct TurnOffIntent: AppIntent {
 }
 
 struct SetTimerIntent: AppIntent {
-    static var title: LocalizedStringResource = "Programar desligamento"
-    static var description = IntentDescription("Desliga o ventilador depois de N minutos.")
+    static var title: LocalizedStringResource = "Programar temporizador"
+    static var description = IntentDescription("Liga ou desliga o ventilador depois de N minutos.")
     static var openAppWhenRun: Bool = false
 
-    @Parameter(title: "Minutos", default: 30, inclusiveRange: (0, 720))
+    @Parameter(title: "Minutos", default: 30, inclusiveRange: (0, 1440))
     var minutes: Int
 
+    @Parameter(title: "Depois, ir para")
+    var action: FanSpeed
+
     static var parameterSummary: some ParameterSummary {
-        Summary("Desligar o ventilador em \(\.$minutes) minutos")
+        Summary("Em \(\.$minutes) minutos, pôr o ventilador em \(\.$action)")
     }
 
     @MainActor
     func perform() async throws -> some IntentResult {
-        await comandar { $0.setTimer(minutes: minutes) }
+        await comandar { $0.setTimer(minutes: minutes, act: action.rawValue) }
         return .result()
     }
 }
