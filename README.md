@@ -113,6 +113,37 @@ aponta para ele com `ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon`.
 O gerador está em `ferramentas/icone.py` — rode e substitua o PNG se quiser
 mexer nas cores ou no formato das pás.
 
+### O formato do Contents.json importa (corrigido em 20/09/2026)
+
+A primeira versão usava `"scale": "1x"` **sem** `"size"`. O `actool` não
+reconhece isso como ícone de app, compila o catálogo sem reclamar, e o
+`Info.plist` sai **sem `CFBundleIcons`** — que é exatamente o que o iOS lê. O
+app instala com o ícone genérico de blueprint e nada no build avisa.
+
+O formato correto, que é o que o próprio Xcode gera para um ícone único:
+
+```json
+{
+  "images" : [
+    { "filename" : "icon-1024.png",
+      "idiom" : "universal",
+      "platform" : "ios",
+      "size" : "1024x1024" }
+  ],
+  "info" : { "author" : "xcode", "version" : 1 }
+}
+```
+
+`size` é obrigatório; `scale` não entra na forma de tamanho único.
+
+Requisitos do PNG: **1024 × 1024, sem canal alfa, sem cantos arredondados** — o
+iOS aplica a máscara sozinho.
+
+### Cache de ícone do iOS
+
+Reinstalar por cima costuma manter o ícone antigo na tela de início. **Apague o
+app antes de reinstalar** quando estiver testando mudança de ícone.
+
 ## Por que os intents não têm parâmetro (20/09/2026)
 
 A primeira versão usava um `@Parameter` de `AppEnum` customizado (`FanSpeed`):
