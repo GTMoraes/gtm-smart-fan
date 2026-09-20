@@ -1,22 +1,25 @@
 import AppIntents
-import SwiftUI
+import Foundation
 
-/// Velocidades como enum, para o Atalhos mostrar uma lista em vez de pedir um
-/// número solto.
-enum FanSpeed: Int, AppEnum {
-    case desligado = 0
-    case lento     = 1
-    case medio     = 2
-    case rapido    = 3
-
-    static var typeDisplayRepresentation: TypeDisplayRepresentation = "Velocidade"
-    static var caseDisplayRepresentations: [FanSpeed: DisplayRepresentation] = [
-        .desligado: "Desligado",
-        .lento:     "Lento",
-        .medio:     "Médio",
-        .rapido:    "Rápido",
-    ]
-}
+// =====================================================================
+//  Ações para o app Atalhos.
+//
+//  TODAS SEM PARÂMETRO, e isso é deliberado.
+//
+//  A primeira versão deste arquivo usava um `@Parameter` de um `AppEnum`
+//  customizado (FanSpeed). O build passava, o app instalava, e NENHUMA ação
+//  aparecia no Atalhos — porque o `appintentsmetadataprocessor` falha em
+//  silêncio com tipos customizados de parâmetro e não gera o
+//  `Metadata.appintents` dentro do .app. Sem esse diretório, o iOS não tem o
+//  que registrar.
+//
+//  O ChargeSpeed, do mesmo autor e mesmo pipeline de build, funciona — e tem
+//  exatamente esta forma: intents sem parâmetro. Copiamos a forma que funciona.
+//
+//  Se um dia quiser um parâmetro (minutos livres no timer), acrescente UM
+//  intent com tipo primitivo (Int), rode o build, e confira o passo
+//  "Conferir ícone e App Intents no bundle" antes de instalar.
+// =====================================================================
 
 /// Tenta o Bluetooth primeiro; se o rádio não subir a tempo, o próprio
 /// `setSpeed` cai para HTTP, que funciona se o Wi-Fi do ventilador estiver no ar.
@@ -28,95 +31,132 @@ private func comandar(_ acao: (FanController) -> Void) async {
     try? await Task.sleep(for: .milliseconds(700))
 }
 
-struct SetSpeedIntent: AppIntent {
-    static var title: LocalizedStringResource = "Definir velocidade"
-    static var description = IntentDescription("Põe o ventilador numa velocidade de 0 a 3.")
-    static var openAppWhenRun: Bool = false
-
-    @Parameter(title: "Velocidade")
-    var speed: FanSpeed
-
-    static var parameterSummary: some ParameterSummary {
-        Summary("Pôr o ventilador em \(\.$speed)")
-    }
-
-    @MainActor
-    func perform() async throws -> some IntentResult {
-        await comandar { $0.setSpeed(speed.rawValue) }
-        return .result()
+@MainActor
+private func viaAtual() -> String {
+    switch FanController.shared.link {
+    case .bluetooth: return "por Bluetooth"
+    case .wifi:      return "por Wi-Fi"
+    default:         return "mas não confirmei a conexão"
     }
 }
 
-struct TurnOffIntent: AppIntent {
+// MARK: - Velocidades
+
+struct DesligarIntent: AppIntent {
     static var title: LocalizedStringResource = "Desligar o ventilador"
     static var description = IntentDescription("Desliga o ventilador.")
-    static var openAppWhenRun: Bool = false
 
     @MainActor
-    func perform() async throws -> some IntentResult {
+    func perform() async throws -> some IntentResult & ProvidesDialog {
         await comandar { $0.setSpeed(0) }
-        return .result()
+        return .result(dialog: "Ventilador desligado, \(viaAtual()).")
     }
 }
 
-struct SetTimerIntent: AppIntent {
-    static var title: LocalizedStringResource = "Programar temporizador"
-    static var description = IntentDescription("Liga ou desliga o ventilador depois de N minutos.")
-    static var openAppWhenRun: Bool = false
-
-    @Parameter(title: "Minutos", default: 30, inclusiveRange: (0, 1440))
-    var minutes: Int
-
-    @Parameter(title: "Depois, ir para")
-    var action: FanSpeed
-
-    static var parameterSummary: some ParameterSummary {
-        Summary("Em \(\.$minutes) minutos, pôr o ventilador em \(\.$action)")
-    }
+struct Velocidade1Intent: AppIntent {
+    static var title: LocalizedStringResource = "Ventilador na velocidade 1"
+    static var description = IntentDescription("Põe o ventilador no lento.")
 
     @MainActor
-    func perform() async throws -> some IntentResult {
-        await comandar { $0.setTimer(minutes: minutes, act: action.rawValue) }
-        return .result()
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        await comandar { $0.setSpeed(1) }
+        return .result(dialog: "Ventilador no lento, \(viaAtual()).")
     }
 }
 
-struct SetWifiIntent: AppIntent {
-    static var title: LocalizedStringResource = "Wi-Fi do ventilador"
-    static var description = IntentDescription("Liga ou desliga o Wi-Fi do ventilador.")
-    static var openAppWhenRun: Bool = false
-
-    @Parameter(title: "Ligado", default: true)
-    var on: Bool
+struct Velocidade2Intent: AppIntent {
+    static var title: LocalizedStringResource = "Ventilador na velocidade 2"
+    static var description = IntentDescription("Põe o ventilador no médio.")
 
     @MainActor
-    func perform() async throws -> some IntentResult {
-        await comandar { $0.setWifi(on) }
-        return .result()
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        await comandar { $0.setSpeed(2) }
+        return .result(dialog: "Ventilador no médio, \(viaAtual()).")
     }
 }
 
-/// Faz os atalhos aparecerem prontos no app Atalhos, sem o usuário ter que
-/// procurar. As frases precisam conter o nome do app.
+struct Velocidade3Intent: AppIntent {
+    static var title: LocalizedStringResource = "Ventilador na velocidade 3"
+    static var description = IntentDescription("Põe o ventilador no rápido.")
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        await comandar { $0.setSpeed(3) }
+        return .result(dialog: "Ventilador no rápido, \(viaAtual()).")
+    }
+}
+
+// MARK: - Temporizador
+
+struct Desligar30Intent: AppIntent {
+    static var title: LocalizedStringResource = "Desligar o ventilador em 30 minutos"
+    static var description = IntentDescription("Programa o desligamento para daqui a 30 minutos.")
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        await comandar { $0.setTimer(minutes: 30, act: 0) }
+        return .result(dialog: "Desliga em 30 minutos.")
+    }
+}
+
+struct Desligar1hIntent: AppIntent {
+    static var title: LocalizedStringResource = "Desligar o ventilador em 1 hora"
+    static var description = IntentDescription("Programa o desligamento para daqui a 1 hora.")
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        await comandar { $0.setTimer(minutes: 60, act: 0) }
+        return .result(dialog: "Desliga em 1 hora.")
+    }
+}
+
+struct CancelarTimerIntent: AppIntent {
+    static var title: LocalizedStringResource = "Cancelar o temporizador do ventilador"
+    static var description = IntentDescription("Cancela o temporizador, sem mexer na velocidade.")
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        await comandar { $0.setTimer(minutes: 0, act: 0) }
+        return .result(dialog: "Temporizador cancelado.")
+    }
+}
+
+// MARK: - Wi-Fi
+
+struct LigarWifiIntent: AppIntent {
+    static var title: LocalizedStringResource = "Ligar o Wi-Fi do ventilador"
+    static var description = IntentDescription("Sobe o rádio Wi-Fi do ventilador.")
+
+    @MainActor
+    func perform() async throws -> some IntentResult & ProvidesDialog {
+        await comandar { $0.setWifi(true) }
+        return .result(dialog: "Wi-Fi do ventilador no ar.")
+    }
+}
+
+// MARK: - Atalhos prontos na galeria
+
 struct VentiladorShortcuts: AppShortcutsProvider {
     static var appShortcuts: [AppShortcut] {
-        AppShortcut(
-            intent: SetSpeedIntent(),
-            phrases: ["Ajustar o \(.applicationName)", "Velocidade do \(.applicationName)"],
-            shortTitle: "Definir velocidade",
-            systemImageName: "wind"
-        )
-        AppShortcut(
-            intent: TurnOffIntent(),
-            phrases: ["Desligar o \(.applicationName)"],
-            shortTitle: "Desligar",
-            systemImageName: "power"
-        )
-        AppShortcut(
-            intent: SetTimerIntent(),
-            phrases: ["Programar o \(.applicationName)"],
-            shortTitle: "Programar desligamento",
-            systemImageName: "timer"
-        )
+        AppShortcut(intent: DesligarIntent(),
+                    phrases: ["Desligar o \(.applicationName)"],
+                    shortTitle: "Desligar",
+                    systemImageName: "power")
+        AppShortcut(intent: Velocidade1Intent(),
+                    phrases: ["\(.applicationName) no lento"],
+                    shortTitle: "Velocidade 1",
+                    systemImageName: "wind")
+        AppShortcut(intent: Velocidade2Intent(),
+                    phrases: ["\(.applicationName) no médio"],
+                    shortTitle: "Velocidade 2",
+                    systemImageName: "wind")
+        AppShortcut(intent: Velocidade3Intent(),
+                    phrases: ["\(.applicationName) no rápido"],
+                    shortTitle: "Velocidade 3",
+                    systemImageName: "wind")
+        AppShortcut(intent: Desligar30Intent(),
+                    phrases: ["Programar o \(.applicationName)"],
+                    shortTitle: "Desligar em 30 min",
+                    systemImageName: "timer")
     }
 }

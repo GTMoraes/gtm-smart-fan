@@ -98,6 +98,63 @@ Dá para checar antes: no Files, dentro do app do LiveContainer, procure
 - `UIBackgroundModes: bluetooth-central` foi declarado no `project.yml` para o
   caso de um intent disparar com o app fechado.
 
+## Ícone (20/09/2026)
+
+`Sources/Assets.xcassets/AppIcon.appiconset/icon-1024.png` — desenho original,
+ventilador de pedestal branco sobre gradiente azul, 1024 × 1024 sem
+transparência (o iOS aplica a máscara arredondada sozinho). O `project.yml`
+aponta para ele com `ASSETCATALOG_COMPILER_APPICON_NAME: AppIcon`.
+
+> **Por que não um SF Symbol:** a licença do SF Symbols permite usar os símbolos
+> na interface do app, mas **proíbe expressamente usá-los como ícone do app**.
+> E, na prática, símbolo é glifo fino — fica ralo num ícone de 60 px. Por isso o
+> desenho é próprio.
+
+O gerador está em `ferramentas/icone.py` — rode e substitua o PNG se quiser
+mexer nas cores ou no formato das pás.
+
+## Por que os intents não têm parâmetro (20/09/2026)
+
+A primeira versão usava um `@Parameter` de `AppEnum` customizado (`FanSpeed`):
+uma ação "Definir velocidade" com uma lista. **O build passava, o app
+instalava, e nenhuma ação aparecia no Atalhos.**
+
+Causa: o `appintentsmetadataprocessor` falha em silêncio com tipos customizados
+de parâmetro e não gera o diretório `Metadata.appintents` dentro do `.app`. Sem
+ele, o iOS não tem o que registrar — e nada no build avisa.
+
+A comparação que resolveu: o **ChargeSpeed**, mesmo autor, mesmo XcodeGen, mesmo
+workflow, e até o mesmo `CODE_SIGNING_ALLOWED=NO` — funciona. E os intents dele
+não têm parâmetro nenhum. Copiamos essa forma.
+
+Resultado: oito intents sem parâmetro (velocidades 0–3, dois timers, cancelar
+timer, ligar Wi-Fi), cada um retornando `ProvidesDialog` para a Siri ter o que
+falar.
+
+> Para reintroduzir um parâmetro no futuro: use **tipo primitivo** (`Int`,
+> `String`, `Bool`), um de cada vez, e confira o passo
+> *"Conferir ícone e App Intents no bundle"* no workflow **antes** de instalar.
+
+## Se os atalhos não aparecerem no app Atalhos
+
+O workflow agora tem um passo **"Conferir ícone e App Intents no bundle"** que
+diz, em texto claro, se `Metadata.appintents` foi para dentro do `.app`. Esse
+diretório é o que o iOS lê para registrar os intents — sem ele, nenhum atalho
+aparece, por mais correto que o Swift esteja.
+
+Se o passo disser **AUSENTE**, o problema é a extração de metadados no build, e
+o log do `xcodebuild` aparece filtrado logo abaixo.
+
+Se disser **presente** e mesmo assim não aparecer:
+
+1. **Abra o app pelo menos uma vez** depois de instalar. O iOS só registra os
+   App Shortcuts na primeira execução.
+2. No app Atalhos, aba **Galeria**, role até o fim — os App Shortcuts aparecem
+   agrupados por app. Ou, criando um atalho, toque em **Apps** e procure
+   *Ventilador*.
+3. Reinicie o iPhone. O índice de atalhos é um cache, e sideload não o invalida
+   do mesmo jeito que uma instalação pela App Store.
+
 ## Detalhes de implementação que importam
 
 - O scan filtra pelo UUID de serviço, então o app só enxerga o ventilador.

@@ -75,6 +75,33 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             build 2>&1 | tee build.log | tail -40
 
+      - name: Conferir icone e App Intents no bundle
+        run: |
+          set -uo pipefail
+          APP="build/Build/Products/Release-iphoneos/Ventilador.app"
+          echo "=== conteudo do .app ==="
+          ls -la "$APP"
+          echo ""
+          if [ -d "$APP/Metadata.appintents" ]; then
+            echo "OK  Metadata.appintents presente — os atalhos devem aparecer no app Atalhos"
+            ls -la "$APP/Metadata.appintents"
+            echo "--- intents encontrados ---"
+            strings "$APP/Metadata.appintents"/* 2>/dev/null \
+              | grep -oE "[A-Za-z0-9]+Intent\b" | sort -u || true
+          else
+            echo "!!! Metadata.appintents AUSENTE"
+            echo "!!! Os App Intents NAO vao aparecer no app Atalhos."
+            echo "--- o que os logs dizem sobre appintents ---"
+            grep -i "appintents\|ExtractAppIntents" build.log | tail -30 || echo "(nada)"
+          fi
+          echo ""
+          if ls "$APP"/AppIcon*.png >/dev/null 2>&1 || [ -f "$APP/Assets.car" ]; then
+            echo "OK  icone compilado no bundle"
+            ls -la "$APP"/AppIcon*.png "$APP/Assets.car" 2>/dev/null
+          else
+            echo "!!! nenhum icone no bundle — o iPhone vai mostrar o icone generico"
+          fi
+
       - name: Empacotar o .ipa
         run: |
           set -euo pipefail
