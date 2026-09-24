@@ -171,7 +171,19 @@ final class FanController: NSObject, ObservableObject {
 
     /// Host usado no fallback por Wi-Fi. `ventilador.local` na rede de casa,
     /// `192.168.4.1` quando o iPhone está no AP do próprio ventilador.
-    @Published var wifiHost = "ventilador.local"
+    @Published var wifiHost = "ventilador.local" { didSet { activeLocalHost = nil } }
+
+    /// IP que o ventilador informa ao HA (atributo "ip" da entidade). O app
+    /// tenta ele direto quando o ventilador.local (mDNS) não atravessa de uma
+    /// rede Wi-Fi para outra — caso da rede IoT separada.
+    @Published private(set) var learnedIP: String = UserDefaults.standard.string(forKey: "fanIP") ?? ""
+    /// O endereço local que respondeu por último (nome ou IP).
+    private var activeLocalHost: String?
+
+    /// Pedido feito pelo HA ainda não confirmado. Enquanto não vence, leituras
+    /// velhas do HA não "desfazem" o pedido na tela (era o 2 → 1 → 2).
+    private var pendingSpeed: Int?
+    private var pendingUntil = Date.distantPast
 
     // MARK: Bluetooth
     private let svcUUID   = CBUUID(string: "6F7A0001-4B2E-4A6D-9C1F-2B5D7E8A3C10")
@@ -338,7 +350,7 @@ final class FanController: NSObject, ObservableObject {
 
     @discardableResult
     private func httpConfig() async -> Bool {
-        guard let url = URL(string: "http://\(wifiHost)/api/config") else { return false }
+        guard let url = URL(string: "http://\(activeLocalHost ?? wifiHost)/api/config") else { return false }
         var req = URLRequest(url: url)
         req.timeoutInterval = 3
         req.cachePolicy = .reloadIgnoringLocalCacheData
@@ -577,6 +589,7 @@ final class FanController: NSObject, ObservableObject {
             let st = j["state"] as? String ?? ""
             if st == "unavailable" || st == "unknown" {
                 var s = FanState(); s.viaRemote = true
+                pendingSpeed = nil
                 state = s
                 lastError = "o ventilador está fora do ar no Home Assistant (sem Wi-Fi ou sem energia)"
                 return true
@@ -585,8 +598,27 @@ final class FanController: NSObject, ObservableObject {
             let pct = (a["percentage"] as? Double) ?? Double(a["percentage"] as? Int ?? 0)
             // Mesma conta do HA: velocidade = teto(pct × 3 / 100).
             let sp = st == "on" ? max(1, min(3, Int((pct * 3 / 100).rounded(.up)))) : 0
+
+            // IP informado pelo ventilador: vira mais um endereço local a tentar.
+            if let ip = a["ip"] as? String, !ip.isEmpty, ip != "0.0.0.0", ip != learnedIP {
+                learnedIP = ip
+                UserDefaults.standard.set(ip, forKey: "fanIP")
+            }
+
             var s = FanState()
             s.speed = sp; s.target = sp; s.viaRemote = true; s.mqttOn = true
+            if let p = pendingSpeed {
+                if sp == p {
+                    pendingSpeed = nil                    // confirmado
+                } else if Date() < pendingUntil {
+                    s.target = p; s.busy = true           // ainda a caminho: não desfaz
+                } else {
+                    pendingSpeed = nil
+                    state = s
+                    lastError = "o ventilador não confirmou a velocidade \(p) pelo HA — está em \(sp)"
+                    return true
+                }
+            }
             state = s
             lastError = nil
             return true
@@ -599,6 +631,10 @@ final class FanController: NSObject, ObservableObject {
     }
 
     private func haSetSpeed(_ speed: Int) async -> Bool {
+        // Marca antes de pedir: uma leitura do HA que já estava a caminho não
+        // pode desfazer o pedido na tela.
+        pendingSpeed = speed
+        pendingUntil = Date().addingTimeInterval(8)
         do {
             let id = try await haFindEntity()
             // 33 / 66 / 100: o HA faz teto(pct × 3 / 100). 67 daria 3, não 2.
@@ -612,7 +648,11 @@ final class FanController: NSObject, ObservableObject {
                                                   "percentage": [0, 33, 66, 100][speed]])
             }
             let c = resp.0
-            guard c == 200 else { lastError = "o HA recusou o comando (\(c))"; return false }
+            guard c == 200 else {
+                pendingSpeed = nil
+                lastError = "o HA recusou o comando (\(c))"
+                return false
+            }
             link = .remote(haHost)
             lastError = nil
             // O HA responde antes de o ventilador aplicar: relê em seguida.
@@ -622,9 +662,11 @@ final class FanController: NSObject, ObservableObject {
             }
             return true
         } catch let e as HAError {
+            pendingSpeed = nil
             lastError = e.msg
             return false
         } catch {
+            pendingSpeed = nil
             lastError = "sem resposta de \(haHost): \(error.localizedDescription)"
             return false
         }
@@ -703,7 +745,7 @@ final class FanController: NSObject, ObservableObject {
         if bluetoothActive { return }
         if localCooldown > 0 && remoteConfigured {
             localCooldown -= 1
-        } else if await httpCall("/api/state", timeout: 1.5) {
+        } else if await localProbe() {
             localCooldown = 0
             return
         }
@@ -712,13 +754,29 @@ final class FanController: NSObject, ObservableObject {
         }
     }
 
+    /// Procura o ventilador na rede local: o último endereço que respondeu, o
+    /// nome configurado (ventilador.local) e o IP aprendido pelo HA.
+    private func localProbe() async -> Bool {
+        var hosts: [String] = []
+        for h in [activeLocalHost, wifiHost, learnedIP] {
+            if let h, !h.isEmpty, !hosts.contains(h) { hosts.append(h) }
+        }
+        for h in hosts {
+            if await httpCall("/api/state", timeout: 1.5, host: h) { return true }
+        }
+        activeLocalHost = nil
+        return false
+    }
+
     private var bluetoothActive: Bool {
         peripheral?.state == .connected && cmdChar != nil
     }
 
     @discardableResult
-    private func httpCall(_ path: String, timeout: TimeInterval = 3) async -> Bool {
-        guard let url = URL(string: "http://\(wifiHost)\(path)") else { return false }
+    private func httpCall(_ path: String, timeout: TimeInterval = 3,
+                          host: String? = nil) async -> Bool {
+        let h = host ?? activeLocalHost ?? wifiHost
+        guard let url = URL(string: "http://\(h)\(path)") else { return false }
         var req = URLRequest(url: url)
         req.timeoutInterval = timeout
         req.cachePolicy = .reloadIgnoringLocalCacheData
@@ -727,7 +785,8 @@ final class FanController: NSObject, ObservableObject {
             guard let j = try JSONSerialization.jsonObject(with: data) as? [String: Any]
             else { return false }
             apply(json: j)
-            link = .wifi(wifiHost)
+            activeLocalHost = h
+            link = .wifi(h)
             lastError = nil
             return true
         } catch {

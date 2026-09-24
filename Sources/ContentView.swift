@@ -212,13 +212,22 @@ struct ContentView: View {
     }
 
     private var hostWifi: some View {
-        HStack {
-            Text("Host Wi-Fi").font(.caption).foregroundStyle(.secondary)
-            TextField("ventilador.local", text: $fan.wifiHost)
-                .textFieldStyle(.roundedBorder)
-                .textInputAutocapitalization(.never)
-                .autocorrectionDisabled()
-                .font(.caption)
+        VStack(alignment: .leading, spacing: 4) {
+            HStack {
+                Text("Host Wi-Fi").font(.caption).foregroundStyle(.secondary)
+                TextField("ventilador.local", text: $fan.wifiHost)
+                    .textFieldStyle(.roundedBorder)
+                    .textInputAutocapitalization(.never)
+                    .autocorrectionDisabled()
+                    .font(.caption)
+            }
+            // O IP vem do próprio ventilador, pelo HA. Quando o .local não
+            // atravessa entre redes Wi-Fi, o app tenta este endereço sozinho.
+            if !fan.learnedIP.isEmpty {
+                Text("também tenta \(fan.learnedIP) (informado pelo ventilador)")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
         }
     }
 
