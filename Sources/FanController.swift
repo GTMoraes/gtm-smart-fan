@@ -743,14 +743,22 @@ final class FanController: NSObject, ObservableObject {
     /// a rede local é retentada a cada ~10 s — voltou para casa, ela assume.
     private func pollOffBLE() async {
         if bluetoothActive { return }
+        // Bug corrigido: o contador era zerado e reposto em 5 na MESMA volta,
+        // então a rede local nunca mais era tentada — o app ficava no remoto
+        // até ser fechado. Agora a espera só recomeça depois de uma tentativa
+        // local de verdade: a rede local é retentada a cada ~6 voltas (~12 s).
+        var tentouLocal = false
         if localCooldown > 0 && remoteConfigured {
             localCooldown -= 1
-        } else if await localProbe() {
-            localCooldown = 0
-            return
+        } else {
+            tentouLocal = true
+            if await localProbe() {
+                localCooldown = 0
+                return
+            }
         }
-        if remoteConfigured, await haPollState() {
-            if localCooldown == 0 { localCooldown = 5 }
+        if remoteConfigured, await haPollState(), tentouLocal {
+            localCooldown = 5
         }
     }
 
