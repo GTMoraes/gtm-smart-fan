@@ -30,6 +30,13 @@ struct ContentView: View {
                     if fan.state.viaRemote { semTimerRemoto } else { temporizador }
                     if case .bluetooth = fan.link { wifiToggle }
                     hostWifi
+                    // Carimbo do build (gerado pelo workflow): é o jeito de saber,
+                    // no iPhone, se o app instalado é o que acabou de ser compilado.
+                    Text("build \(BuildInfo.run) · \(BuildInfo.commit) · \(BuildInfo.date)")
+                        .font(.caption2.monospaced())
+                        .foregroundStyle(.tertiary)
+                        .frame(maxWidth: .infinity)
+                        .padding(.top, 4)
                 }
                 .padding(.horizontal, 20)
                 .padding(.bottom, 28)
