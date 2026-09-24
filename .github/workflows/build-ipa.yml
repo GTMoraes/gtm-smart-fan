@@ -1,3 +1,6 @@
+# >>> No repositório, este arquivo vai em .github/workflows/build-ipa.yml
+# (o nome aqui é diferente porque pastas .github são protegidas na gravação)
+
 name: Build unsigned IPA
 
 # Compila o app Ventilador num macOS alugado do GitHub e publica o .ipa
@@ -53,6 +56,24 @@ jobs:
           p.write_text(s)
           print(s)
           PY
+
+      - name: Carimbar a versao no app
+        # O app mostra este carimbo na tela principal. Sem ele, um .ipa antigo
+        # instalado por engano parece identico a um novo — falha silenciosa ja
+        # vivida (24/09/2026: codigo certo no repo, app velho no iPhone).
+        run: |
+          set -euo pipefail
+          SHA="${GITHUB_SHA::7}"
+          QUANDO="$(TZ=America/Recife date '+%d/%m %H:%M')"
+          cat > Sources/BuildInfo.swift <<EOF
+          // Gerado pelo workflow a cada build — nao edite.
+          enum BuildInfo {
+              static let commit = "$SHA"
+              static let date   = "$QUANDO"
+              static let run    = "${GITHUB_RUN_NUMBER}"
+          }
+          EOF
+          cat Sources/BuildInfo.swift
 
       - name: Gerar o .xcodeproj
         run: xcodegen generate
@@ -142,12 +163,16 @@ jobs:
           set -euo pipefail
           APP="build/Build/Products/Release-iphoneos/Ventilador.app"
           test -d "$APP" || { echo "App nao foi gerado"; exit 1; }
-          rm -rf Payload Ventilador-unsigned.ipa
+          # Nome UNICO por build: com nome fixo, o navegador salva o novo como
+          # "Ventilador-unsigned (1).ipa" e e facil instalar o antigo.
+          IPA="Ventilador-${GITHUB_RUN_NUMBER}-${GITHUB_SHA::7}.ipa"
+          echo "IPA=$IPA" >> "$GITHUB_ENV"
+          rm -rf Payload Ventilador-*.ipa
           mkdir Payload
           cp -R "$APP" Payload/
           rm -rf Payload/Ventilador.app/_CodeSignature
-          zip -qry Ventilador-unsigned.ipa Payload
-          ls -lh Ventilador-unsigned.ipa
+          zip -qry "$IPA" Payload
+          ls -l "$IPA"
 
       - name: Guardar o log em caso de erro
         if: always()
@@ -163,12 +188,21 @@ jobs:
         run: |
           set -euo pipefail
           TAG="ipa-$(date +%Y%m%d-%H%M%S)"
-          gh release create "$TAG" Ventilador-unsigned.ipa \
-            --title "Ventilador $TAG" \
-            --notes "IPA sem assinatura. Instale pelo AltStore ou pelo LiveContainer."
-          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/Ventilador-unsigned.ipa"
+          TAM="$(stat -f%z "$IPA")"
+          HASH="$(shasum -a 256 "$IPA" | cut -c1-12)"
+          gh release create "$TAG" "$IPA" \
+            --title "Ventilador build ${GITHUB_RUN_NUMBER} · ${GITHUB_SHA::7}" \
+            --notes "IPA sem assinatura. Instale pelo AltStore. Tamanho ${TAM} bytes, sha256 ${HASH}…"
+          URL="https://github.com/${GITHUB_REPOSITORY}/releases/download/${TAG}/${IPA}"
           {
-            echo "## IPA pronto"
+            echo "## IPA pronto — build ${GITHUB_RUN_NUMBER} · commit ${GITHUB_SHA::7}"
+            echo ""
+            echo "O app mostra, no rodape da tela principal: **build ${GITHUB_RUN_NUMBER} · ${GITHUB_SHA::7}**."
+            echo "Se mostrar outro numero (ou nenhum), o .ipa instalado NAO e este."
+            echo ""
+            echo "| arquivo | tamanho | sha256 |"
+            echo "|---|---|---|"
+            echo "| \`${IPA}\` | ${TAM} bytes | \`${HASH}…\` |"
             echo ""
             echo "    $URL"
             echo ""
