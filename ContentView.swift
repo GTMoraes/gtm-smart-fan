@@ -9,7 +9,7 @@ struct ContentView: View {
     @State private var timerAct = 0
 
     private let nomes  = ["Desligado", "Lento", "Médio", "Rápido"]
-    private let fontes = ["boot", "chave física", "celular", "bluetooth", "timer"]
+    private let fontes = ["boot", "chave física", "celular", "bluetooth", "timer", "remoto (HA)"]
     private let fundo  = Color(red: 0.055, green: 0.067, blue: 0.086)
     private let azul   = Color(red: 0.37, green: 0.69, blue: 0.94)
 
@@ -25,8 +25,9 @@ struct ContentView: View {
             ScrollView {
                 VStack(spacing: 18) {
                     cartaoEstado
+                    if let erro = fan.lastError { aviso(erro) }
                     grade
-                    temporizador
+                    if fan.state.viaRemote { semTimerRemoto } else { temporizador }
                     if case .bluetooth = fan.link { wifiToggle }
                     hostWifi
                 }
@@ -163,6 +164,27 @@ struct ContentView: View {
         .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 18))
     }
 
+    private func aviso(_ texto: String) -> some View {
+        Text(texto)
+            .font(.caption)
+            .foregroundStyle(.orange)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(12)
+            .background(.orange.opacity(0.10), in: RoundedRectangle(cornerRadius: 14))
+    }
+
+    /// Pelo HA só passa velocidade — timer, "voltar como estava" e o resto não.
+    /// Melhor dizer isso do que mostrar um timer vazio que pode não ser verdade.
+    private var semTimerRemoto: some View {
+        Text("Temporizador: só por Bluetooth ou na rede local. "
+             + "Pelo Home Assistant o app controla só a velocidade.")
+            .font(.caption)
+            .foregroundStyle(.secondary)
+            .frame(maxWidth: .infinity, alignment: .leading)
+            .padding(14)
+            .background(.white.opacity(0.04), in: RoundedRectangle(cornerRadius: 18))
+    }
+
     /// Ligar/desligar o rádio agora é operação, não preferência — fica aqui.
     /// As POLÍTICAS (Wi-Fi permanente, voltar como estava) foram para os Ajustes.
     private var wifiToggle: some View {
@@ -210,8 +232,9 @@ struct ContentView: View {
         if fan.state.busy || fan.state.speed != fan.state.target {
             return "mudando para \(nomes[min(fan.state.target, 3)].lowercased())…"
         }
+        if fan.state.viaRemote { return "via Home Assistant" }
         if fan.state.timerMin > 0 { return legendaTimer }
-        return "último comando: \(fontes[min(fan.state.source, 4)])"
+        return "último comando: \(fontes[min(fan.state.source, fontes.count - 1)])"
     }
 
     private var corDoLink: Color {
@@ -220,6 +243,7 @@ struct ContentView: View {
         case .scanning:  return .yellow
         case .bluetooth: return .blue
         case .wifi:      return .green
+        case .remote:    return .purple
         }
     }
 }

@@ -31,13 +31,23 @@ private func comandar(_ acao: (FanController) -> Void) async {
     try? await Task.sleep(for: .milliseconds(700))
 }
 
+/// Velocidade: Bluetooth > rede local > Home Assistant, e ESPERA a confirmação.
+/// O atalho só diz "feito" se algum caminho confirmou — e diz qual.
 @MainActor
-private func viaAtual() -> String {
-    switch FanController.shared.link {
-    case .bluetooth: return "por Bluetooth"
-    case .wifi:      return "por Wi-Fi"
-    default:         return "mas não confirmei a conexão"
-    }
+private func velocidade(_ n: Int, _ feito: String) async -> String {
+    let fan = FanController.shared
+    await fan.waitForBluetooth(timeout: 6)
+    if let via = await fan.setSpeedConfirmed(n) { return "\(feito), \(via)." }
+    return "Não consegui falar com o ventilador: \(fan.lastError ?? "nenhum caminho respondeu")."
+}
+
+/// Timer: não passa pelo HA — só Bluetooth ou rede local.
+@MainActor
+private func timer(_ min: Int, _ feito: String) async -> String {
+    let fan = FanController.shared
+    await fan.waitForBluetooth(timeout: 6)
+    if let via = await fan.setTimerConfirmed(minutes: min, act: 0) { return "\(feito), \(via)." }
+    return "Não programei: o temporizador só funciona por Bluetooth ou na rede local."
 }
 
 // MARK: - Velocidades
@@ -48,8 +58,8 @@ struct DesligarIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        await comandar { $0.setSpeed(0) }
-        return .result(dialog: "Ventilador desligado, \(viaAtual()).")
+        let msg = await velocidade(0, "Ventilador desligado")
+        return .result(dialog: "\(msg)")
     }
 }
 
@@ -59,8 +69,8 @@ struct Velocidade1Intent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        await comandar { $0.setSpeed(1) }
-        return .result(dialog: "Ventilador no lento, \(viaAtual()).")
+        let msg = await velocidade(1, "Ventilador no lento")
+        return .result(dialog: "\(msg)")
     }
 }
 
@@ -70,8 +80,8 @@ struct Velocidade2Intent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        await comandar { $0.setSpeed(2) }
-        return .result(dialog: "Ventilador no médio, \(viaAtual()).")
+        let msg = await velocidade(2, "Ventilador no médio")
+        return .result(dialog: "\(msg)")
     }
 }
 
@@ -81,8 +91,8 @@ struct Velocidade3Intent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        await comandar { $0.setSpeed(3) }
-        return .result(dialog: "Ventilador no rápido, \(viaAtual()).")
+        let msg = await velocidade(3, "Ventilador no rápido")
+        return .result(dialog: "\(msg)")
     }
 }
 
@@ -94,8 +104,8 @@ struct Desligar30Intent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        await comandar { $0.setTimer(minutes: 30, act: 0) }
-        return .result(dialog: "Desliga em 30 minutos.")
+        let msg = await timer(30, "Desliga em 30 minutos")
+        return .result(dialog: "\(msg)")
     }
 }
 
@@ -105,8 +115,8 @@ struct Desligar1hIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        await comandar { $0.setTimer(minutes: 60, act: 0) }
-        return .result(dialog: "Desliga em 1 hora.")
+        let msg = await timer(60, "Desliga em 1 hora")
+        return .result(dialog: "\(msg)")
     }
 }
 
@@ -116,8 +126,8 @@ struct CancelarTimerIntent: AppIntent {
 
     @MainActor
     func perform() async throws -> some IntentResult & ProvidesDialog {
-        await comandar { $0.setTimer(minutes: 0, act: 0) }
-        return .result(dialog: "Temporizador cancelado.")
+        let msg = await timer(0, "Temporizador cancelado")
+        return .result(dialog: "\(msg)")
     }
 }
 

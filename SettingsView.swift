@@ -21,6 +21,14 @@ struct SettingsView: View {
     /// A lista da busca só fica aberta até uma rede ser tocada — depois some,
     /// para não ficar no caminho do "Testar" nem receber toque acidental.
     @State private var listaAberta = false
+    // Ventilador → broker (vai para o ventilador, por BLE)
+    @State private var mqttUri  = ""
+    @State private var mqttUser = ""
+    @State private var mqttPass = ""
+    // App → Home Assistant (fica no iPhone)
+    @State private var haURL    = ""
+    @State private var haToken  = ""
+    @State private var haErro: String?
     @FocusState private var focoSenha: Bool
 
     var body: some View {
@@ -116,6 +124,61 @@ struct SettingsView: View {
             } footer: {
                 Text("A senha precisa de 8 caracteres ou mais. Em branco, a rede "
                      + "sobe aberta. Esta é a rede que funciona onde não há Wi-Fi nenhum.")
+            }
+
+            Section {
+                TextField("wss://mqtt.frx9.com", text: $mqttUri)
+                    .keyboardType(.URL)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                TextField("usuário", text: $mqttUser)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                SecureField(fan.config.hasMqttPass ? "senha definida — em branco mantém" : "senha",
+                            text: $mqttPass)
+            } header: {
+                Text("Ventilador → Home Assistant (MQTT)")
+            } footer: {
+                Text("\(estadoMqtt) Endereço vazio desliga. Vale na hora, sem reiniciar — use o **Salvar** lá embaixo.")
+            }
+
+            Section {
+                TextField("https://ha.frx9.com", text: $haURL)
+                    .keyboardType(.URL)
+                    .autocorrectionDisabled()
+                    .textInputAutocapitalization(.never)
+                SecureField(fan.hasHAToken ? "token definido — em branco mantém"
+                                           : "token de longa duração",
+                            text: $haToken)
+                Button {
+                    haErro = fan.saveRemote(url: haURL, token: haToken)
+                    if haErro == nil {
+                        haToken = ""
+                        if fan.remoteConfigured { Task { await fan.testRemote() } }
+                    }
+                } label: {
+                    HStack {
+                        Text(fan.remoteTest == .running ? "Testando…" : "Salvar e testar acesso remoto")
+                        Spacer()
+                        if fan.remoteTest == .running { ProgressView() }
+                    }
+                }
+                .disabled(fan.remoteTest == .running)
+            } header: {
+                Text("Acesso remoto pelo app (Home Assistant)")
+            } footer: {
+                VStack(alignment: .leading, spacing: 6) {
+                    if let haErro { Text(haErro).foregroundStyle(.red) }
+                    switch fan.remoteTest {
+                    case .ok(let m):     Text(m).foregroundStyle(.green)
+                    case .failed(let m): Text(m).foregroundStyle(.red)
+                    default:             EmptyView()
+                    }
+                    Text("Sem Bluetooth e fora da rede local, o app fala com o ventilador "
+                         + "pelo Home Assistant — só velocidade. Token: no HA, Perfil → "
+                         + "Segurança → Tokens de acesso de longa duração. Fica no Keychain "
+                         + "deste iPhone e dá acesso ao seu HA inteiro. URL vazia desliga.")
+                }
             }
 
             Section {
@@ -270,6 +333,13 @@ struct SettingsView: View {
         && apSsid == fan.config.apSsid && mdns == fan.config.mdns
         && staPass.isEmpty && apPass.isEmpty && token.isEmpty && passkey.isEmpty
         && !(redeAberta && fan.config.hasStaPass)
+        && mqttUri.trimmingCharacters(in: .whitespaces) == fan.config.mqttUri
+        && mqttUser == fan.config.mqttUser && mqttPass.isEmpty
+    }
+
+    private var estadoMqtt: String {
+        if fan.config.mqttUri.isEmpty { return "Desligado." }
+        return fan.state.mqttOn ? "Conectado ao broker." : "Configurado, mas NÃO conectado agora."
     }
 
     private func carregar() {
@@ -277,6 +347,9 @@ struct SettingsView: View {
         staSsid = fan.config.staSsid
         apSsid  = fan.config.apSsid
         mdns    = fan.config.mdns
+        mqttUri  = fan.config.mqttUri
+        mqttUser = fan.config.mqttUser
+        if haURL.isEmpty { haURL = fan.haURL }
     }
 
     /// false = não salvou nada (validação falhou).
@@ -302,7 +375,11 @@ struct SettingsView: View {
         if !passkey.isEmpty {
             fan.setSetting(.passkey, passkey); precisaReiniciar = true
         }
-        staPass = ""; apPass = ""; token = ""; passkey = ""
+        let uri = mqttUri.trimmingCharacters(in: .whitespaces)
+        if uri != fan.config.mqttUri       { fan.setSetting(.mqttUri, uri) }
+        if mqttUser != fan.config.mqttUser { fan.setSetting(.mqttUser, mqttUser) }
+        if !mqttPass.isEmpty               { fan.setSetting(.mqttPass, mqttPass) }
+        staPass = ""; apPass = ""; token = ""; passkey = ""; mqttPass = ""
         return true
     }
 }

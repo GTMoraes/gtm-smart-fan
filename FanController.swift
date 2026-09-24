@@ -1,5 +1,6 @@
 import Foundation
 import CoreBluetooth
+import Security
 
 /// Estado do ventilador, igual nas duas vias de comunicação.
 struct FanState: Equatable {
@@ -16,6 +17,11 @@ struct FanState: Equatable {
     var restoreOn: Bool = false
     /// Wi-Fi NÃO se desliga sozinho por ociosidade.
     var wifiStaysOn: Bool = false
+    /// O ventilador está conectado ao broker MQTT (acesso remoto no ar).
+    var mqttOn: Bool = false
+    /// Estado veio do Home Assistant: só velocidade é conhecida — timer,
+    /// origem e o resto não passam pelo HA.
+    var viaRemote: Bool = false
 }
 
 /// Ajustes que moram no ventilador, não no telefone. Nenhuma senha vem junto —
@@ -30,6 +36,9 @@ struct FanConfig: Equatable {
     var hasToken    = false
     var bleSecOn    = false
     var wifiIdleMin = 20
+    var mqttUri     = ""
+    var mqttUser    = ""
+    var hasMqttPass = false
 }
 
 /// Ids dos ajustes — os mesmos do firmware e do PROTOCOLO.md.
@@ -42,6 +51,9 @@ enum CfgId: UInt8 {
     case mdns    = 0x06
     case token   = 0x07
     case passkey = 0x08
+    case mqttUri  = 0x09
+    case mqttUser = 0x0A
+    case mqttPass = 0x0B
     case factory = 0x7F
 }
 
@@ -75,14 +87,61 @@ enum Link: Equatable {
     case scanning
     case bluetooth
     case wifi(String)
+    case remote(String)
 
     var label: String {
         switch self {
-        case .offline:      return "sem conexão"
-        case .scanning:     return "procurando…"
-        case .bluetooth:    return "bluetooth"
-        case .wifi(let h):  return "wi-fi · \(h)"
+        case .offline:        return "sem conexão"
+        case .scanning:       return "procurando…"
+        case .bluetooth:      return "bluetooth"
+        case .wifi(let h):    return "wi-fi · \(h)"
+        case .remote(let h):  return "remoto · \(h)"
         }
+    }
+}
+
+enum RemoteTest: Equatable {
+    case idle
+    case running
+    case ok(String)
+    case failed(String)
+}
+
+struct HAError: Error { let msg: String; init(_ m: String) { msg = m } }
+
+/// Token do Home Assistant: no Keychain, nunca em UserDefaults.
+/// `AfterFirstUnlock` para os atalhos funcionarem com o iPhone bloqueado.
+enum Keychain {
+    private static let service = "com.gtm.ventilador.ha"
+
+    static func read(_ account: String) -> String? {
+        let q: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+            kSecReturnData as String: true,
+            kSecMatchLimit as String: kSecMatchLimitOne,
+        ]
+        var out: CFTypeRef?
+        guard SecItemCopyMatching(q as CFDictionary, &out) == errSecSuccess,
+              let d = out as? Data else { return nil }
+        return String(data: d, encoding: .utf8)
+    }
+
+    /// Valor vazio apaga. Devolve o OSStatus — erro de Keychain tem de aparecer.
+    @discardableResult
+    static func write(_ account: String, _ value: String) -> OSStatus {
+        let base: [String: Any] = [
+            kSecClass as String: kSecClassGenericPassword,
+            kSecAttrService as String: service,
+            kSecAttrAccount as String: account,
+        ]
+        SecItemDelete(base as CFDictionary)
+        if value.isEmpty { return errSecSuccess }
+        var add = base
+        add[kSecValueData as String] = Data(value.utf8)
+        add[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlock
+        return SecItemAdd(add as CFDictionary, nil)
     }
 }
 
@@ -99,6 +158,16 @@ final class FanController: NSObject, ObservableObject {
     @Published var lastError: String?
     @Published var wifiScan: WifiScan = .idle
     @Published var wifiTest: WifiTest = .idle
+
+    // Acesso remoto pelo Home Assistant — o último degrau:
+    // Bluetooth > HTTP local > HA. A URL mora no UserDefaults, o token no Keychain.
+    @Published var haURL: String = UserDefaults.standard.string(forKey: "haURL") ?? ""
+    @Published var haEntity: String = UserDefaults.standard.string(forKey: "haEntity") ?? ""
+    @Published var remoteTest: RemoteTest = .idle
+    @Published private(set) var hasHAToken: Bool = Keychain.read("haToken") != nil
+    private var haToken: String? = Keychain.read("haToken")
+    /// Com o remoto ativo, a rede local só é tentada de vez em quando.
+    private var localCooldown = 0
 
     /// Host usado no fallback por Wi-Fi. `ventilador.local` na rede de casa,
     /// `192.168.4.1` quando o iPhone está no AP do próprio ventilador.
@@ -137,8 +206,33 @@ final class FanController: NSObject, ObservableObject {
         if let p = peripheral, let c = cmdChar, p.state == .connected {
             p.writeValue(Data([0x01, UInt8(speed)]), for: c, type: .withResponse)
         } else {
-            Task { await httpCall("/api/set?speed=\(speed)") }
+            Task { _ = await sendSpeedOffBLE(speed) }
         }
+    }
+
+    /// Para os atalhos: manda e ESPERA a confirmação. Devolve por onde foi, ou
+    /// nil se nenhum caminho respondeu — o atalho não pode dizer "feito" à toa.
+    func setSpeedConfirmed(_ speed: Int) async -> String? {
+        guard (0...3).contains(speed) else { return nil }
+        if bluetoothActive { setSpeed(speed); return "por Bluetooth" }
+        state.target = speed
+        return await sendSpeedOffBLE(speed)
+    }
+
+    /// Sem Bluetooth: rede local primeiro, HA depois. Se o remoto é o caminho
+    /// ativo, vai direto nele (a rede local já se mostrou ausente).
+    private func sendSpeedOffBLE(_ speed: Int) async -> String? {
+        var triedRemote = false
+        if case .remote = link, remoteConfigured {
+            triedRemote = true
+            if await haSetSpeed(speed) { return "pelo Home Assistant" }
+        }
+        if await httpCall("/api/set?speed=\(speed)", timeout: 1.5) { return "pela rede local" }
+        if !triedRemote, remoteConfigured, await haSetSpeed(speed) { return "pelo Home Assistant" }
+        if !remoteConfigured && lastError == nil {
+            lastError = "sem Bluetooth e sem rede local — configure o acesso remoto nos Ajustes"
+        }
+        return nil
     }
 
     /// `act`: 0 desliga, 1..3 liga naquela velocidade. Um timer por vez.
@@ -150,8 +244,21 @@ final class FanController: NSObject, ObservableObject {
             p.writeValue(Data([0x02, UInt8(m & 0xFF), UInt8(m >> 8), a]),
                          for: c, type: .withResponse)
         } else {
-            Task { await httpCall("/api/timer?min=\(m)&act=\(a)") }
+            Task { _ = await timerOffBLE(m, a) }
         }
+    }
+
+    /// Para os atalhos: o timer não passa pelo HA (decisão do projeto).
+    func setTimerConfirmed(minutes: Int, act: Int = 0) async -> String? {
+        if bluetoothActive { setTimer(minutes: minutes, act: act); return "por Bluetooth" }
+        let m = UInt16(max(0, min(1440, minutes)))
+        return await timerOffBLE(m, UInt8(max(0, min(3, act))))
+    }
+
+    private func timerOffBLE(_ m: UInt16, _ a: UInt8) async -> String? {
+        if await httpCall("/api/timer?min=\(m)&act=\(a)", timeout: 1.5) { return "pela rede local" }
+        lastError = "o temporizador só funciona por Bluetooth ou na rede local"
+        return nil
     }
 
     /// Liga ou desliga o Wi-Fi do ventilador — via BLE, que é o único caminho
@@ -255,6 +362,9 @@ final class FanController: NSObject, ObservableObject {
         c.hasToken    = (j["hastoken"]   as? Int ?? 0) == 1
         c.bleSecOn    = (j["blesec"]     as? Int ?? 0) == 1
         c.wifiIdleMin = j["wifioff"] as? Int ?? 20
+        c.mqttUri     = j["mqtt"]     as? String ?? ""
+        c.mqttUser    = j["mqttuser"] as? String ?? ""
+        c.hasMqttPass = (j["hasmqttpass"] as? Int ?? 0) == 1
         config = c
     }
 
@@ -368,6 +478,187 @@ final class FanController: NSObject, ObservableObject {
         if wifiScan != .running && wifiTest != .running { netTimeout?.cancel() }
     }
 
+    // MARK: acesso remoto (Home Assistant)
+
+    var remoteConfigured: Bool { !haURL.isEmpty && haToken != nil }
+
+    var haHost: String { URL(string: haURL)?.host ?? haURL }
+
+    /// Grava URL e token. Token vazio mantém o atual; URL vazia desliga tudo.
+    /// Devolve uma mensagem de erro, ou nil.
+    func saveRemote(url: String, token: String) -> String? {
+        var u = url.trimmingCharacters(in: .whitespacesAndNewlines)
+        while u.hasSuffix("/") { u.removeLast() }
+        if !u.isEmpty && !(u.hasPrefix("https://") || u.hasPrefix("http://")) {
+            return "a URL precisa começar com https://"
+        }
+        if u.isEmpty {
+            Keychain.write("haToken", "")
+            haToken = nil
+        } else if !token.isEmpty {
+            let st = Keychain.write("haToken", token.trimmingCharacters(in: .whitespacesAndNewlines))
+            if st != errSecSuccess { return "não consegui guardar o token no Keychain (código \(st))" }
+            haToken = Keychain.read("haToken")
+            if haToken == nil { return "o Keychain aceitou o token mas não devolveu — tente de novo" }
+        }
+        hasHAToken = haToken != nil
+        haURL = u
+        UserDefaults.standard.set(u, forKey: "haURL")
+        setEntity("")                                // URL/token novos: redescobre
+        remoteTest = .idle
+        return nil
+    }
+
+    private func setEntity(_ id: String) {
+        haEntity = id
+        UserDefaults.standard.set(id, forKey: "haEntity")
+    }
+
+    private func haRequest(_ method: String, _ path: String,
+                           body: [String: Any]? = nil,
+                           timeout: TimeInterval = 6) async throws -> (Int, Data) {
+        guard let tok = haToken, let url = URL(string: haURL + path) else {
+            throw HAError("acesso remoto não configurado")
+        }
+        var r = URLRequest(url: url)
+        r.httpMethod = method
+        r.timeoutInterval = timeout
+        r.cachePolicy = .reloadIgnoringLocalCacheData
+        r.setValue("Bearer \(tok)", forHTTPHeaderField: "Authorization")
+        r.setValue("application/json", forHTTPHeaderField: "Content-Type")
+        if let body { r.httpBody = try JSONSerialization.data(withJSONObject: body) }
+        let (d, resp) = try await URLSession.shared.data(for: r)
+        let code = (resp as? HTTPURLResponse)?.statusCode ?? 0
+        if code == 401 { throw HAError("o HA recusou o token (401) — gere outro em Perfil → Segurança") }
+        return (code, d)
+    }
+
+    /// Acha a entidade do ventilador no HA: primeiro o nome padrão que o
+    /// Discovery cria (fan.ventilador); se não existir, procura um fan.* cujo
+    /// nome tenha "ventilador", preferindo o de 3 velocidades.
+    private func haFindEntity() async throws -> String {
+        if !haEntity.isEmpty { return haEntity }
+        let (c1, _) = try await haRequest("GET", "/api/states/fan.ventilador")
+        if c1 == 200 { setEntity("fan.ventilador"); return haEntity }
+        let (c2, d2) = try await haRequest("GET", "/api/states", timeout: 10)
+        guard c2 == 200,
+              let arr = try JSONSerialization.jsonObject(with: d2) as? [[String: Any]] else {
+            throw HAError("resposta inesperada do HA ao listar entidades (\(c2))")
+        }
+        var achados: [(String, Bool)] = []
+        for e in arr {
+            guard let id = e["entity_id"] as? String, id.hasPrefix("fan.") else { continue }
+            let a = e["attributes"] as? [String: Any] ?? [:]
+            let nome = (a["friendly_name"] as? String ?? "").lowercased()
+            guard nome.contains("ventilador") else { continue }
+            let passo = (a["percentage_step"] as? Double) ?? 0
+            achados.append((id, abs(passo - 100.0 / 3) < 1))
+        }
+        guard let melhor = achados.first(where: { $0.1 }) ?? achados.first else {
+            throw HAError("não achei o ventilador no HA — ele aparece no MQTT?")
+        }
+        setEntity(melhor.0)
+        return haEntity
+    }
+
+    /// Lê o estado pelo HA. true = o HA respondeu (mesmo que o ventilador
+    /// esteja indisponível — aí o erro diz isso).
+    @discardableResult
+    private func haPollState() async -> Bool {
+        do {
+            let id = try await haFindEntity()
+            let (c, d) = try await haRequest("GET", "/api/states/\(id)")
+            if c == 404 { setEntity(""); return false }      // renomeado: redescobre
+            guard c == 200,
+                  let j = try JSONSerialization.jsonObject(with: d) as? [String: Any] else {
+                return false
+            }
+            link = .remote(haHost)
+            let st = j["state"] as? String ?? ""
+            if st == "unavailable" || st == "unknown" {
+                var s = FanState(); s.viaRemote = true
+                state = s
+                lastError = "o ventilador está fora do ar no Home Assistant (sem Wi-Fi ou sem energia)"
+                return true
+            }
+            let a = j["attributes"] as? [String: Any] ?? [:]
+            let pct = (a["percentage"] as? Double) ?? Double(a["percentage"] as? Int ?? 0)
+            // Mesma conta do HA: velocidade = teto(pct × 3 / 100).
+            let sp = st == "on" ? max(1, min(3, Int((pct * 3 / 100).rounded(.up)))) : 0
+            var s = FanState()
+            s.speed = sp; s.target = sp; s.viaRemote = true; s.mqttOn = true
+            state = s
+            lastError = nil
+            return true
+        } catch let e as HAError {
+            lastError = e.msg
+            return false
+        } catch {
+            return false
+        }
+    }
+
+    private func haSetSpeed(_ speed: Int) async -> Bool {
+        do {
+            let id = try await haFindEntity()
+            // 33 / 66 / 100: o HA faz teto(pct × 3 / 100). 67 daria 3, não 2.
+            let resp: (Int, Data)
+            if speed == 0 {
+                resp = try await haRequest("POST", "/api/services/fan/turn_off",
+                                           body: ["entity_id": id])
+            } else {
+                resp = try await haRequest("POST", "/api/services/fan/set_percentage",
+                                           body: ["entity_id": id,
+                                                  "percentage": [0, 33, 66, 100][speed]])
+            }
+            let c = resp.0
+            guard c == 200 else { lastError = "o HA recusou o comando (\(c))"; return false }
+            link = .remote(haHost)
+            lastError = nil
+            // O HA responde antes de o ventilador aplicar: relê em seguida.
+            Task { [weak self] in
+                try? await Task.sleep(for: .milliseconds(1200))
+                await self?.haPollState()
+            }
+            return true
+        } catch let e as HAError {
+            lastError = e.msg
+            return false
+        } catch {
+            lastError = "sem resposta de \(haHost): \(error.localizedDescription)"
+            return false
+        }
+    }
+
+    /// Botão "Testar acesso remoto": cada etapa falha com o motivo dela.
+    func testRemote() async {
+        remoteTest = .running
+        guard remoteConfigured else { remoteTest = .failed("preencha a URL e o token"); return }
+        do {
+            let (c, _) = try await haRequest("GET", "/api/")
+            guard c == 200 else {
+                remoteTest = .failed("o HA respondeu \(c) em /api/ — a URL está certa?")
+                return
+            }
+            setEntity("")
+            let id = try await haFindEntity()
+            let (c2, d2) = try await haRequest("GET", "/api/states/\(id)")
+            guard c2 == 200,
+                  let j = try JSONSerialization.jsonObject(with: d2) as? [String: Any] else {
+                remoteTest = .failed("achei \(id), mas não consegui ler o estado (\(c2))")
+                return
+            }
+            let st = j["state"] as? String ?? "?"
+            remoteTest = (st == "unavailable")
+                ? .ok("acesso ok · \(id) — mas o ventilador está indisponível no HA agora")
+                : .ok("acesso ok · \(id) · \(st == "on" ? "ligado" : "desligado")")
+        } catch let e as HAError {
+            remoteTest = .failed(e.msg)
+        } catch {
+            remoteTest = .failed("sem resposta de \(haHost): \(error.localizedDescription)")
+        }
+    }
+
     // MARK: para os App Intents
 
     /// Espera o BLE ficar utilizável, até `timeout`. Um atalho disparado com o
@@ -400,11 +691,24 @@ final class FanController: NSObject, ObservableObject {
         pollTask = Task { [weak self] in
             while !Task.isCancelled {
                 guard let self else { return }
-                if await self.bluetoothActive == false {
-                    await self.httpCall("/api/state")
-                }
+                await self.pollOffBLE()
                 try? await Task.sleep(for: .seconds(2))
             }
+        }
+    }
+
+    /// Sem Bluetooth: rede local; se não responder, o HA. Com o remoto ativo,
+    /// a rede local é retentada a cada ~10 s — voltou para casa, ela assume.
+    private func pollOffBLE() async {
+        if bluetoothActive { return }
+        if localCooldown > 0 && remoteConfigured {
+            localCooldown -= 1
+        } else if await httpCall("/api/state", timeout: 1.5) {
+            localCooldown = 0
+            return
+        }
+        if remoteConfigured, await haPollState() {
+            if localCooldown == 0 { localCooldown = 5 }
         }
     }
 
@@ -413,10 +717,10 @@ final class FanController: NSObject, ObservableObject {
     }
 
     @discardableResult
-    private func httpCall(_ path: String) async -> Bool {
+    private func httpCall(_ path: String, timeout: TimeInterval = 3) async -> Bool {
         guard let url = URL(string: "http://\(wifiHost)\(path)") else { return false }
         var req = URLRequest(url: url)
-        req.timeoutInterval = 3
+        req.timeoutInterval = timeout
         req.cachePolicy = .reloadIgnoringLocalCacheData
         do {
             let (data, _) = try await URLSession.shared.data(for: req)
@@ -427,7 +731,10 @@ final class FanController: NSObject, ObservableObject {
             lastError = nil
             return true
         } catch {
-            if case .bluetooth = link {} else { link = .offline }
+            switch link {
+            case .bluetooth, .remote: break      // outro caminho segue valendo
+            default: link = .offline
+            }
             return false
         }
     }
@@ -443,6 +750,7 @@ final class FanController: NSObject, ObservableObject {
         s.wifiOn   = true
         s.restoreOn   = (j["restore"] as? Int ?? 0) == 1
         s.wifiStaysOn = (j["wifioff"] as? Int ?? 20) == 0
+        s.mqttOn      = (j["mqtt"] as? String ?? "") == "conectado"
         state = s
     }
 }
@@ -539,6 +847,7 @@ extension FanController: CBCentralManagerDelegate, CBPeripheralDelegate {
         s.wifiOn    = (d[6] & 0x01) != 0
         s.restoreOn    = (d[6] & 0x02) != 0
         s.wifiStaysOn  = (d[6] & 0x04) != 0
+        s.mqttOn       = (d[6] & 0x10) != 0
         state = s
         link = .bluetooth
         lastError = nil
