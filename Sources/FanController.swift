@@ -45,6 +45,31 @@ enum CfgId: UInt8 {
     case factory = 0x7F
 }
 
+/// Uma rede encontrada pela busca do próprio ventilador.
+struct WifiNet: Identifiable, Equatable {
+    var ssid: String
+    var rssi: Int
+    var locked: Bool
+    var id: String { ssid }
+
+    /// 0...1, para o ícone de Wi-Fi com preenchimento variável.
+    var bars: Double { rssi >= -60 ? 1.0 : (rssi >= -70 ? 0.66 : 0.33) }
+}
+
+enum WifiScan: Equatable {
+    case idle
+    case running
+    case done(nets: [WifiNet], ignored: Int, cut: Int)
+    case failed(String)
+}
+
+enum WifiTest: Equatable {
+    case idle
+    case running
+    case ok(ip: String, rssi: Int)
+    case failed(String)
+}
+
 enum Link: Equatable {
     case offline
     case scanning
@@ -72,6 +97,8 @@ final class FanController: NSObject, ObservableObject {
     @Published var config = FanConfig()
     @Published var link: Link = .offline
     @Published var lastError: String?
+    @Published var wifiScan: WifiScan = .idle
+    @Published var wifiTest: WifiTest = .idle
 
     /// Host usado no fallback por Wi-Fi. `ventilador.local` na rede de casa,
     /// `192.168.4.1` quando o iPhone está no AP do próprio ventilador.
@@ -83,12 +110,15 @@ final class FanController: NSObject, ObservableObject {
     private let stateUUID = CBUUID(string: "6F7A0003-4B2E-4A6D-9C1F-2B5D7E8A3C10")
     private let cfgWUUID  = CBUUID(string: "6F7A0004-4B2E-4A6D-9C1F-2B5D7E8A3C10")
     private let cfgRUUID  = CBUUID(string: "6F7A0005-4B2E-4A6D-9C1F-2B5D7E8A3C10")
+    private let netUUID   = CBUUID(string: "6F7A0006-4B2E-4A6D-9C1F-2B5D7E8A3C10")
 
     private var central: CBCentralManager!
     private var peripheral: CBPeripheral?
     private var cmdChar: CBCharacteristic?
     private var cfgWChar: CBCharacteristic?
     private var cfgRChar: CBCharacteristic?
+    private var netChar: CBCharacteristic?
+    private var netTimeout: Task<Void, Never>?
     private var pollTask: Task<Void, Never>?
 
     override init() {
@@ -228,6 +258,116 @@ final class FanController: NSObject, ObservableObject {
         config = c
     }
 
+    // MARK: busca de redes e teste de conexão (só por Bluetooth)
+
+    /// O ventilador procura as redes de 2,4 GHz em volta dele — que é o que
+    /// importa: o sinal que chega ao ventilador, não ao telefone.
+    func scanWifi() {
+        guard let link = netLink() else {
+            wifiScan = .failed(lastError ?? "sem Bluetooth")
+            return
+        }
+        let (p, c) = link
+        wifiScan = .running
+        p.writeValue(Data([0x08, 0x00]), for: c, type: .withResponse)
+        armNetTimeout(seconds: 25)
+    }
+
+    /// Testa a rede de casa JÁ GRAVADA no ventilador. Quem chama tem de salvar
+    /// SSID e senha antes (a fila do firmware garante a ordem).
+    func testWifi() {
+        guard let link = netLink() else {
+            wifiTest = .failed(lastError ?? "sem Bluetooth")
+            return
+        }
+        let (p, c) = link
+        wifiTest = .running
+        p.writeValue(Data([0x08, 0x01]), for: c, type: .withResponse)
+        armNetTimeout(seconds: 35)
+    }
+
+    private func netLink() -> (CBPeripheral, CBCharacteristic)? {
+        guard let p = peripheral, let c = cmdChar, p.state == .connected else {
+            lastError = "a busca de redes funciona só pelo Bluetooth"
+            return nil
+        }
+        // Conectado mas sem a característica nova: firmware antigo na placa.
+        guard netChar != nil else {
+            lastError = "o firmware da placa não tem a busca de redes — regrave"
+            return nil
+        }
+        return (p, c)
+    }
+
+    /// Nada volta calado: se o ventilador não responder, a tela diz.
+    private func armNetTimeout(seconds: Int) {
+        netTimeout?.cancel()
+        netTimeout = Task { [weak self] in
+            try? await Task.sleep(for: .seconds(seconds))
+            guard let self, !Task.isCancelled else { return }
+            if self.wifiScan == .running {
+                self.wifiScan = .failed("o ventilador não respondeu em \(seconds) s")
+            }
+            if self.wifiTest == .running {
+                self.wifiTest = .failed("o ventilador não respondeu em \(seconds) s")
+            }
+        }
+    }
+
+    /// Texto da característica 6f7a0006 — formato no PROTOCOLO.md.
+    private func applyNet(_ d: Data) {
+        let txt = String(decoding: d, as: UTF8.self)
+        var lines = txt.split(separator: "\n", omittingEmptySubsequences: false).map(String.init)
+        guard !lines.isEmpty else { return }
+        let head = lines.removeFirst().split(separator: " ").map(String.init)
+        guard head.count >= 2 else { return }
+        let kind = head[0], st = head[1]
+
+        if kind == "S" {
+            guard wifiScan == .running else { return }      // resultado velho: ignora
+            switch st {
+            case "0": return                                  // ainda procurando
+            case "1":
+                var nets: [WifiNet] = []
+                for l in lines where !l.isEmpty {
+                    let f = l.split(separator: "\t", maxSplits: 2,
+                                    omittingEmptySubsequences: false).map(String.init)
+                    guard f.count == 3, let r = Int(f[0]) else { continue }
+                    nets.append(WifiNet(ssid: f[2], rssi: r, locked: f[1] != "0"))
+                }
+                let ign = head.count > 2 ? Int(head[2]) ?? 0 : 0
+                let cut = head.count > 3 ? Int(head[3]) ?? 0 : 0
+                wifiScan = .done(nets: nets, ignored: ign, cut: cut)
+            default:
+                let m = head.count > 2 ? head[2] : "?"
+                wifiScan = .failed(m == "semwifi" ? "firmware compilado sem Wi-Fi"
+                                   : m == "tempo" ? "a busca não terminou em 15 s"
+                                   : "a busca falhou (\(m))")
+            }
+        } else if kind == "T" {
+            guard wifiTest == .running else { return }
+            switch st {
+            case "0": return
+            case "1":
+                let ip = head.count > 2 ? head[2] : "?"
+                let rssi = head.count > 3 ? Int(head[3]) ?? 0 : 0
+                wifiTest = .ok(ip: ip, rssi: rssi)
+            default:
+                let m = head.count > 2 ? head[2] : "?"
+                let cod = head.count > 3 ? head[3] : "?"
+                switch m {
+                case "senha":    wifiTest = .failed("a rede recusou a senha (código \(cod))")
+                case "naoachou": wifiTest = .failed("o ventilador não encontrou a rede — confira o nome e se ela é de 2,4 GHz (código \(cod))")
+                case "tempo":    wifiTest = .failed("não conectou em 20 s (último código \(cod))")
+                case "semrede":  wifiTest = .failed("nenhuma rede de casa gravada no ventilador")
+                case "semwifi":  wifiTest = .failed("firmware compilado sem Wi-Fi")
+                default:         wifiTest = .failed("falhou: \(m) (código \(cod))")
+                }
+            }
+        }
+        if wifiScan != .running && wifiTest != .running { netTimeout?.cancel() }
+    }
+
     // MARK: para os App Intents
 
     /// Espera o BLE ficar utilizável, até `timeout`. Um atalho disparado com o
@@ -338,6 +478,7 @@ extension FanController: CBCentralManagerDelegate, CBPeripheralDelegate {
         cmdChar = nil
         cfgWChar = nil
         cfgRChar = nil
+        netChar = nil
         peripheral = nil
         link = .scanning
         c.scanForPeripherals(withServices: [svcUUID])
@@ -354,7 +495,8 @@ extension FanController: CBCentralManagerDelegate, CBPeripheralDelegate {
             // As quatro. Esquecer as de configuração aqui faz cfgWChar/cfgRChar
             // ficarem nil para sempre, e a tela de ajustes silenciosamente cai
             // no fallback HTTP — que não funciona com o Wi-Fi desligado.
-            p.discoverCharacteristics([cmdUUID, stateUUID, cfgWUUID, cfgRUUID], for: $0)
+            // (O workflow de build confere que todo UUID declarado está nesta lista.)
+            p.discoverCharacteristics([cmdUUID, stateUUID, cfgWUUID, cfgRUUID, netUUID], for: $0)
         }
     }
 
@@ -368,12 +510,24 @@ extension FanController: CBCentralManagerDelegate, CBPeripheralDelegate {
             }
             if ch.uuid == cfgWUUID { cfgWChar = ch }
             if ch.uuid == cfgRUUID { cfgRChar = ch; p.readValue(for: ch) }
+            if ch.uuid == netUUID {
+                netChar = ch
+                p.setNotifyValue(true, for: ch)
+                // Reconectou no meio de uma busca/teste (o Bluetooth pode piscar
+                // enquanto o rádio varre os canais): o resultado pode já estar lá.
+                if wifiScan == .running || wifiTest == .running { p.readValue(for: ch) }
+            }
         }
     }
 
     func peripheral(_ p: CBPeripheral, didUpdateValueFor ch: CBCharacteristic,
                     error: Error?) {
         if ch.uuid == cfgRUUID, let d = ch.value { applyConfig(d); lastError = nil; return }
+        if ch.uuid == netUUID, let d = ch.value {
+            // Notify traz só "!" (o valor inteiro não cabe num notify): lê o completo.
+            if d == Data([0x21]) { p.readValue(for: ch) } else { applyNet(d) }
+            return
+        }
         guard ch.uuid == stateUUID, let d = ch.value, d.count >= 7 else { return }
         var s = FanState()
         s.speed    = Int(d[0])

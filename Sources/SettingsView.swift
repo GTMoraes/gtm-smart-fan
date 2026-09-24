@@ -16,6 +16,8 @@ struct SettingsView: View {
     @State private var passkey  = ""
     @State private var precisaReiniciar = false
     @State private var aviso: String?
+    /// Rede tocada na lista da busca — é por ela que se sabe se é aberta.
+    @State private var escolhida: WifiNet?
 
     var body: some View {
         Form {
@@ -39,13 +41,60 @@ struct SettingsView: View {
                 TextField("nome da sua rede", text: $staSsid)
                     .autocorrectionDisabled()
                     .textInputAutocapitalization(.never)
-                SecureField(fan.config.hasStaPass ? "definida — em branco mantém" : "sem senha",
-                            text: $staPass)
+                if redeAberta {
+                    Text("rede aberta — sem senha").foregroundStyle(.secondary)
+                } else {
+                    SecureField(fan.config.hasStaPass ? "definida — em branco mantém" : "sem senha",
+                                text: $staPass)
+                }
+
+                Button { fan.scanWifi() } label: {
+                    HStack {
+                        Text(fan.wifiScan == .running ? "Procurando redes…" : "Procurar redes")
+                        Spacer()
+                        if fan.wifiScan == .running { ProgressView() }
+                    }
+                }
+                .disabled(ocupado)
+
+                if case .done(let redes, _, _) = fan.wifiScan {
+                    ForEach(redes) { rede in
+                        Button { escolher(rede) } label: {
+                            HStack(spacing: 10) {
+                                Image(systemName: "wifi", variableValue: rede.bars)
+                                    .foregroundStyle(.secondary)
+                                Text(rede.ssid).foregroundStyle(.primary)
+                                Spacer()
+                                if rede.locked {
+                                    Image(systemName: "lock.fill")
+                                        .font(.caption).foregroundStyle(.secondary)
+                                }
+                                if rede.ssid == staSsid {
+                                    Image(systemName: "checkmark").foregroundStyle(.tint)
+                                }
+                            }
+                        }
+                    }
+                }
+
+                Button { testar() } label: {
+                    HStack {
+                        Text(fan.wifiTest == .running ? "Testando…"
+                             : (nadaMudou ? "Testar conexão" : "Salvar e testar conexão"))
+                        Spacer()
+                        if fan.wifiTest == .running { ProgressView() }
+                    }
+                }
+                .disabled(staSsid.isEmpty || ocupado)
             } header: {
                 Text("Rede de casa")
             } footer: {
-                Text("Com a rede de casa configurada, o ventilador atende em "
-                     + "**\(mdns.isEmpty ? "ventilador" : mdns).local** de qualquer cômodo.")
+                VStack(alignment: .leading, spacing: 6) {
+                    rodapeBusca
+                    rodapeTeste
+                    Text("Com a rede de casa configurada, o ventilador atende em "
+                         + "**\(mdns.isEmpty ? "ventilador" : mdns).local** de qualquer cômodo.")
+                }
             }
 
             Section {
@@ -110,7 +159,7 @@ struct SettingsView: View {
             }
 
             Section {
-                Button("Salvar") { salvar() }
+                Button("Salvar") { _ = salvar() }
                     .disabled(nadaMudou)
                 Button("Reiniciar o ventilador") { fan.reboot(); precisaReiniciar = false }
                     .foregroundStyle(precisaReiniciar ? Color.orange : Color.accentColor)
@@ -144,6 +193,66 @@ struct SettingsView: View {
         .onChange(of: fan.config) { _, _ in carregar() }
     }
 
+    // MARK: rede de casa
+
+    private var ocupado: Bool { fan.wifiScan == .running || fan.wifiTest == .running }
+
+    private var redeAberta: Bool {
+        guard let e = escolhida, e.ssid == staSsid else { return false }
+        return !e.locked
+    }
+
+    private func escolher(_ rede: WifiNet) {
+        escolhida = rede
+        staSsid = rede.ssid
+        if !rede.locked { staPass = "" }
+    }
+
+    private func testar() {
+        // O teste usa o que está GRAVADO no ventilador. Se mudou algo, salva
+        // antes: a fila do firmware só começa o teste depois de gravar tudo.
+        if !nadaMudou { guard salvar() else { return } }
+        fan.testWifi()
+    }
+
+    @ViewBuilder private var rodapeBusca: some View {
+        switch fan.wifiScan {
+        case .done(let redes, let ign, let cortadas):
+            if redes.isEmpty {
+                Text("Nenhuma rede compatível perto do ventilador. Ele só enxerga 2,4 GHz.")
+                    .foregroundStyle(.orange)
+            } else {
+                let extras = [
+                    ign > 0 ? "\(ign) ignorada\(ign == 1 ? "" : "s") (oculta ou corporativa)" : nil,
+                    cortadas > 0 ? "\(cortadas) mais fraca\(cortadas == 1 ? "" : "s") não coube\(cortadas == 1 ? "" : "ram")" : nil
+                ].compactMap { $0 }
+                Text("Sinal medido no ventilador, não no telefone. Só 2,4 GHz."
+                     + (extras.isEmpty ? "" : " " + extras.joined(separator: " · ") + "."))
+            }
+        case .failed(let m):
+            Text(m).foregroundStyle(.red)
+        default:
+            EmptyView()
+        }
+    }
+
+    @ViewBuilder private var rodapeTeste: some View {
+        switch fan.wifiTest {
+        case .ok(let ip, let rssi):
+            Text("Conectou — IP \(ip), sinal \(rssi) dBm (\(qualidade(rssi))). "
+                 + "Se o Wi-Fi do ventilador estava desligado, ele desliga de novo.")
+                .foregroundStyle(.green)
+        case .failed(let m):
+            Text(m).foregroundStyle(.red)
+        default:
+            EmptyView()
+        }
+    }
+
+    private func qualidade(_ rssi: Int) -> String {
+        rssi >= -60 ? "bom" : (rssi >= -70 ? "razoável" : "fraco")
+    }
+
     private var passkeyPlaceholder: String {
         fan.config.bleSecOn ? "ligado — em branco mantém" : "desligado — 6 dígitos para ligar"
     }
@@ -152,6 +261,7 @@ struct SettingsView: View {
         bleName == fan.config.bleName && staSsid == fan.config.staSsid
         && apSsid == fan.config.apSsid && mdns == fan.config.mdns
         && staPass.isEmpty && apPass.isEmpty && token.isEmpty && passkey.isEmpty
+        && !(redeAberta && fan.config.hasStaPass)
     }
 
     private func carregar() {
@@ -161,17 +271,22 @@ struct SettingsView: View {
         mdns    = fan.config.mdns
     }
 
-    private func salvar() {
+    /// false = não salvou nada (validação falhou).
+    @discardableResult
+    private func salvar() -> Bool {
         aviso = nil
         if !apPass.isEmpty && apPass.count < 8 {
             aviso = "a senha do Wi-Fi do ventilador precisa de 8 caracteres ou mais"
-            return
+            return false
         }
         if !bleName.isEmpty && bleName != fan.config.bleName {
             fan.setSetting(.bleName, bleName); precisaReiniciar = true
         }
         if staSsid != fan.config.staSsid { fan.setSetting(.staSsid, staSsid) }
         if !staPass.isEmpty              { fan.setSetting(.staPass, staPass) }
+        // Rede aberta escolhida na lista: a senha antiga tem de SAIR, senão o
+        // ventilador tenta entrar numa rede aberta oferecendo senha.
+        else if redeAberta && fan.config.hasStaPass { fan.setSetting(.staPass, "") }
         if !apSsid.isEmpty && apSsid != fan.config.apSsid { fan.setSetting(.apSsid, apSsid) }
         if !apPass.isEmpty               { fan.setSetting(.apPass, apPass) }
         if !mdns.isEmpty && mdns != fan.config.mdns { fan.setSetting(.mdns, mdns) }
@@ -180,5 +295,6 @@ struct SettingsView: View {
             fan.setSetting(.passkey, passkey); precisaReiniciar = true
         }
         staPass = ""; apPass = ""; token = ""; passkey = ""
+        return true
     }
 }
